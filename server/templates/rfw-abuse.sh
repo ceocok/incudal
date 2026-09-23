@@ -98,7 +98,7 @@ has_ipv6() {
 # 独立 DD 域名黑洞（dnsmasq 继承宿主机 /etc/hosts，容器解析即黑洞）
 apply_dd_dns_sinkhole() {
     local marker="# Incudal Anti-DD Sinkhole"
-    local domains="moeclub.org cx9208.com iso.qaq.wiki leitbogioro.org"
+    local domains="moeclub.org cx9208.com iso.qaq.wiki leitbogioro.org images.linuxcontainers.org"
     if ! grep -q "$marker" /etc/hosts 2>/dev/null; then
         {
             echo "$marker"
@@ -111,6 +111,79 @@ apply_dd_dns_sinkhole() {
 clean_dd_dns_sinkhole() {
     if [[ -f /etc/hosts ]] && grep -q "# Incudal Anti-DD Sinkhole" /etc/hosts 2>/dev/null; then
         sed -i '/# Incudal Anti-DD Sinkhole/,+2d' /etc/hosts 2>/dev/null || true
+    fi
+}
+
+# 宿主机实时反 DD 守护进程（秒级击毙容器内运行的 DD 与换系统脚本）
+apply_antidd_daemon() {
+    cat > /usr/local/bin/rfw-antidd-daemon << 'EOF'
+#!/usr/bin/env bash
+# Incudal Anti-DD Real-Time Process Killer
+PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall"
+while true; do
+    # 扫描属于容器命名空间的进程 (UID >= 1000000 属于 Incus 映射的用户命名空间)
+    pids=$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="$PATTERN" '$1 >= 1000000 && $0 ~ pat && $0 !~ /rfw-antidd/ {print $2}')
+    for p in $pids; do
+        if kill -9 "$p" 2>/dev/null; then
+            logger -t rfw-antidd "Killed rogue container DD process: PID $p"
+        fi
+    done
+    sleep 0.5
+done
+EOF
+    chmod +x /usr/local/bin/rfw-antidd-daemon
+
+    cat > /etc/systemd/system/rfw-antidd.service << 'EOF'
+[Unit]
+Description=Incudal Anti-DD Real-Time Process Killer
+After=incus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rfw-antidd-daemon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable --now rfw-antidd.service >/dev/null 2>&1 || true
+    log "已启动宿主机反 DD 进程秒级巡检守护服务 (rfw-antidd)"
+}
+
+stop_antidd_daemon() {
+    systemctl stop rfw-antidd.service 2>/dev/null || true
+    systemctl disable rfw-antidd.service 2>/dev/null || true
+    rm -f /etc/systemd/system/rfw-antidd.service /usr/local/bin/rfw-antidd-daemon 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+# 容器内文件锁：破坏 OsMutation 的创建与挂载工作流
+apply_container_traps() {
+    command -v incus >/dev/null 2>&1 || return 0
+    local containers
+    containers=$(incus list status=running type=container -c n --format csv 2>/dev/null || true)
+    local count=0
+    for ct in $containers; do
+        [[ -z "$ct" ]] && continue
+        # 1. 锁死 /x，使 mkdir /x 彻底失败，无法作为 rootfs 工作区与挂载点
+        incus exec "$ct" -- sh -c 'touch /x 2>/dev/null && chmod 000 /x 2>/dev/null && chattr +i /x 2>/dev/null || true' 2>/dev/null || true
+        # 2. 占位脚本文件直接 exit 1
+        incus exec "$ct" -- sh -c '
+            for f in /root/OsMutation.sh /root/reinstall.sh /root/InstallNET.sh /root/NewReinstall.sh /usr/local/bin/OsMutation.sh; do
+                if [ ! -f "$f" ]; then
+                    echo "#!/bin/sh" > "$f" 2>/dev/null
+                    echo "echo \"\033[1;31m[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！\033[0m\"" >> "$f" 2>/dev/null
+                    echo "exit 1" >> "$f" 2>/dev/null
+                    chmod 755 "$f" 2>/dev/null || true
+                fi
+            done
+        ' 2>/dev/null || true
+        count=$((count+1))
+    done
+    if [ "$count" -gt 0 ]; then
+        log "已为当前运行的 $count 个容器布署防 DD 物理工作区锁"
     fi
 }
 
@@ -137,6 +210,7 @@ clean_rules() {
     fi
 
     clean_dd_dns_sinkhole
+    stop_antidd_daemon
     log "已清理现有防护规则"
 }
 
@@ -398,9 +472,15 @@ apply_rules() {
 
         # 宿主机 hosts 域名黑洞（Incus 网桥 dnsmasq 默认读取 /etc/hosts，容器解析即黑洞）
         apply_dd_dns_sinkhole
-        log "DD重装脚本拦截规则已生效"
+
+        # 启动宿主机实时击毙守护与容器物理工作区锁
+        apply_antidd_daemon
+        apply_container_traps
+
+        log "DD重装拦截全维体系（实时进程击毙 + 容器目录锁 + DPI + DNS黑洞）已生效"
     else
         clean_dd_dns_sinkhole
+        stop_antidd_daemon
     fi
 
     # ========================== 8. 链尾部安全放行 ==========================
