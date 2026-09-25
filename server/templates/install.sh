@@ -25,13 +25,14 @@ INJECT_AGENT_SECRET=""
 INJECT_AGENT_INSTALL_TOKEN=""
 INJECT_AGENT_BINARY_URL=""
 INJECT_AGENT_ENABLED="true"
+INJECT_CONNLIMIT_MAX=""
 # ==============================
 
 # ========================== 全局常量 ==========================
 PANEL_URL="${INJECT_PANEL_URL:-}"
 PANEL_URL="${PANEL_URL%/}"
 readonly PANEL_URL
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly SCRIPT_URL="https://raw.githubusercontent.com/ceocok/incudal/main/server/templates/install.sh"
 readonly BRIDGE_SUBNET="10.10.0.1/22"
 readonly BRIDGE_NAME="incusbr0"
@@ -44,6 +45,8 @@ readonly AGENT_ENABLED="${INJECT_AGENT_ENABLED:-true}"
 readonly AGENT_SERVICE_NAME="incudal-agent"
 readonly AGENT_CONFIG_FILE="${INCUDAL_AGENT_CONFIG_FILE:-/etc/incudal-agent/config.yaml}"
 readonly AGENT_BIN_PATH="${INCUDAL_AGENT_BIN:-/usr/local/bin/incudal-agent}"
+readonly DEFAULT_CONNLIMIT_MAX="200"
+readonly CONNLIMIT_FILE="/etc/incudal-connlimit"
 
 # ZFS 预编译模块下载候选源列表（按优先级依次尝试，优先个人仓库，回退作者仓库）
 # 格式: <源URL>/zfs-modules-<内核版本>.tar.gz
@@ -78,6 +81,13 @@ DEFAULT_IFACE=""
 IS_PURE_IPV6="false"
 AGENT_INSTALL_STATUS="未安装"
 AGENT_HEARTBEAT_INTERVAL_SECONDS="30"
+CONNLIMIT_MAX="${INJECT_CONNLIMIT_MAX:-${DEFAULT_CONNLIMIT_MAX}}"
+if [[ -f "$CONNLIMIT_FILE" ]]; then
+    _saved_connlimit=$(cat "$CONNLIMIT_FILE" 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ "$_saved_connlimit" =~ ^[0-9]+$ ]]; then
+        CONNLIMIT_MAX="$_saved_connlimit"
+    fi
+fi
 
 # ========================== 工具函数 ==========================
 log()   { echo -e "${GREEN}[✓]${NC} $1"; }
@@ -485,6 +495,16 @@ show_system_info() {
         echo -e "  网络兼容  :  ${GREEN}运行中${NC} (Docker/UFW/Firewalld 兼容自愈生效中)"
     fi
 
+    local current_connlimit="${DEFAULT_CONNLIMIT_MAX}"
+    if [[ -f "$CONNLIMIT_FILE" ]]; then
+        current_connlimit=$(cat "$CONNLIMIT_FILE" 2>/dev/null | tr -d '[:space:]' || echo "${DEFAULT_CONNLIMIT_MAX}")
+    fi
+    if [[ "$current_connlimit" == "0" ]]; then
+        echo -e "  并发限制  :  ${YELLOW}已关闭${NC}"
+    else
+        echo -e "  并发限制  :  ${GREEN}单实例最大 ${current_connlimit} 并发${NC} (防BT/测速/防被墙守护中)"
+    fi
+
     divider
     echo ""
 }
@@ -502,12 +522,13 @@ show_menu() {
     echo -e "    ${CYAN}9)${NC}  网络自愈  ${DIM}─  检测并修复 Docker/UFW/防火墙阻断及实例断网${NC}"
     echo -e "    ${CYAN}10)${NC} RFW 防滥用  ${DIM}─  屏蔽测速 / 挖矿 / BT / DD重装系统 (管理与自愈)${NC}"
     echo -e "    ${CYAN}11)${NC} 更新管理脚本  ${DIM}─  获取最新版本并刷新 incudal 命令${NC}"
+    echo -e "    ${CYAN}12)${NC} 并发限制管理  ${DIM}─  设置小鸡单实例最大并发 (默认 200，防被墙)${NC}"
     echo ""
     echo -e "    ${RED}5)${NC}  卸载 RFW  ${DIM}─  移除 RFW 防火墙${NC}"
     echo -e "    ${RED}6)${NC}  卸载节点  ${DIM}─  彻底清理还原系统${NC}"
     echo -e "    ${CYAN}0)${NC}  退出"
     echo ""
-    echo -ne "  ${BOLD}请输入选项 [0-11]: ${NC}"
+    echo -ne "  ${BOLD}请输入选项 [0-12]: ${NC}"
 }
 
 # ========================== 网络模式说明 ==========================
@@ -1718,6 +1739,18 @@ setup_network_firewall_compat() {
 set -euo pipefail
 
 BRIDGE="${bridge_name}"
+CONNLIMIT_FILE="${CONNLIMIT_FILE}"
+DEFAULT_CONNLIMIT="${DEFAULT_CONNLIMIT_MAX}"
+
+CONNLIMIT_MAX="\$DEFAULT_CONNLIMIT"
+if [[ -f "\$CONNLIMIT_FILE" ]]; then
+    _saved_cl=\$(cat "\$CONNLIMIT_FILE" 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ "\$_saved_cl" =~ ^[0-9]+$ ]]; then
+        CONNLIMIT_MAX="\$_saved_cl"
+    fi
+else
+    echo "\$DEFAULT_CONNLIMIT" > "\$CONNLIMIT_FILE" 2>/dev/null || true
+fi
 
 # 确保内核三层路由转发与连接跟踪调优
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
@@ -1728,6 +1761,12 @@ sysctl -w net.bridge.bridge-nf-call-arptables=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.netfilter.nf_conntrack_max=1048576 >/dev/null 2>&1 || true
+
+# 连接跟踪快速回收（避免空闲死连接长期占用并发配额导致误伤，将默认5天缩短至10分钟）
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=600 >/dev/null 2>&1 || true
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_close_wait=30 >/dev/null 2>&1 || true
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30 >/dev/null 2>&1 || true
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_fin_wait=30 >/dev/null 2>&1 || true
 
 # 1. 处理 iptables 底层 FORWARD 链（插在最前避免被任何自定义 DROP/REJECT 拦截）
 if command -v iptables >/dev/null 2>&1; then
@@ -1742,6 +1781,21 @@ if command -v iptables >/dev/null 2>&1; then
 
     # TCP MSS 自动钳制（彻底杜绝 PMTU 黑洞与大包卡死丢包）
     iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+    # 单容器并发连接数限制 (默认每个容器 200 并发，防滥用/防BT/防测速/防被墙)
+    iptables -N INCUDAL_LIMIT 2>/dev/null || true
+    iptables -F INCUDAL_LIMIT 2>/dev/null || true
+    if [[ "\$CONNLIMIT_MAX" =~ ^[0-9]+$ ]] && [[ "\$CONNLIMIT_MAX" -gt 0 ]]; then
+        # 入站：每个目标容器 IP (daddr) 并发 <= CONNLIMIT_MAX，超出直接 TCP RESET
+        iptables -A INCUDAL_LIMIT -o "\$BRIDGE" -p tcp --syn -m connlimit --connlimit-above "\$CONNLIMIT_MAX" --connlimit-daddr --connlimit-mask 32 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        # 出站：每个源容器 IP (saddr) 并发 <= CONNLIMIT_MAX，超出直接 TCP RESET（拦截 BT/多播/扫描）
+        iptables -A INCUDAL_LIMIT -i "\$BRIDGE" -p tcp --syn -m connlimit --connlimit-above "\$CONNLIMIT_MAX" --connlimit-saddr --connlimit-mask 32 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        # UDP 限制：每个源容器 IP UDP 新建连接并发 <= CONNLIMIT_MAX，超出丢弃
+        iptables -A INCUDAL_LIMIT -i "\$BRIDGE" -p udp -m conntrack --ctstate NEW -m connlimit --connlimit-above "\$CONNLIMIT_MAX" --connlimit-saddr --connlimit-mask 32 -j DROP 2>/dev/null || true
+    fi
+    # 挂载 INCUDAL_LIMIT 到 FORWARD 链顶端（先于 ACCEPT 评估）
+    iptables -D FORWARD -j INCUDAL_LIMIT 2>/dev/null || true
+    iptables -I FORWARD 1 -j INCUDAL_LIMIT 2>/dev/null || true
 fi
 
 # 2. 处理 ip6tables 底层 FORWARD 链与 MSS 钳制
@@ -1749,6 +1803,16 @@ if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -C FORWARD -i "\$BRIDGE" -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 1 -i "\$BRIDGE" -j ACCEPT 2>/dev/null || true
     ip6tables -C FORWARD -o "\$BRIDGE" -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 1 -o "\$BRIDGE" -j ACCEPT 2>/dev/null || true
     ip6tables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || ip6tables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+    ip6tables -N INCUDAL_LIMIT_V6 2>/dev/null || true
+    ip6tables -F INCUDAL_LIMIT_V6 2>/dev/null || true
+    if [[ "\$CONNLIMIT_MAX" =~ ^[0-9]+$ ]] && [[ "\$CONNLIMIT_MAX" -gt 0 ]]; then
+        ip6tables -A INCUDAL_LIMIT_V6 -o "\$BRIDGE" -p tcp --syn -m connlimit --connlimit-above "\$CONNLIMIT_MAX" --connlimit-daddr --connlimit-mask 128 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        ip6tables -A INCUDAL_LIMIT_V6 -i "\$BRIDGE" -p tcp --syn -m connlimit --connlimit-above "\$CONNLIMIT_MAX" --connlimit-saddr --connlimit-mask 128 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        ip6tables -A INCUDAL_LIMIT_V6 -i "\$BRIDGE" -p udp -m conntrack --ctstate NEW -m connlimit --connlimit-above "\$CONNLIMIT_MAX" --connlimit-saddr --connlimit-mask 128 -j DROP 2>/dev/null || true
+    fi
+    ip6tables -D FORWARD -j INCUDAL_LIMIT_V6 2>/dev/null || true
+    ip6tables -I FORWARD 1 -j INCUDAL_LIMIT_V6 2>/dev/null || true
 fi
 
 # 3. 处理 UFW 防火墙 (若开启，需将 DEFAULT_FORWARD_POLICY 改为 ACCEPT 并放行路由)
@@ -1818,6 +1882,16 @@ EOF
 
     log "出口物理网卡 MTU (${host_mtu}) 与网桥及 TCP MSS 自动钳制已同步完毕"
     log "网络与防火墙兼容守护服务 (incus-network-compat.service) 已激活就绪"
+
+    local active_limit="${DEFAULT_CONNLIMIT_MAX}"
+    if [[ -f "$CONNLIMIT_FILE" ]]; then
+        active_limit=$(cat "$CONNLIMIT_FILE" 2>/dev/null | tr -d '[:space:]' || echo "${DEFAULT_CONNLIMIT_MAX}")
+    fi
+    if [[ "$active_limit" == "0" ]]; then
+        info "容器单实例并发限制: 已关闭"
+    else
+        log "容器单实例并发限制: 单实例最大 ${active_limit} 并发 (内核连接跟踪超时优化已生效，防被墙守护就绪)"
+    fi
 
     # 8. 自动体检与修复已有的异常容器（如因之前断网导致未装上 openssh 或 MTU 未同步的容器）
     auto_heal_broken_containers
@@ -1893,6 +1967,11 @@ do_repair_host() {
     local host_mtu=""
     host_mtu=$(ip -o link show dev "$DEFAULT_IFACE" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}' || echo "1500")
 
+    local report_connlimit="${DEFAULT_CONNLIMIT_MAX}"
+    if [[ -f "$CONNLIMIT_FILE" ]]; then
+        report_connlimit=$(cat "$CONNLIMIT_FILE" 2>/dev/null | tr -d '[:space:]' || echo "${DEFAULT_CONNLIMIT_MAX}")
+    fi
+
     echo ""
     divider
     echo -e "  ${BOLD}${GREEN}✓ 母机网络与防火墙体检自愈完成！${NC}"
@@ -1901,6 +1980,11 @@ do_repair_host() {
     echo -e "  TCP MSS 钳制 :  ${GREEN}已激活${NC} (彻底根除大包断流卡死)"
     echo -e "  网桥高速 DNS :  ${GREEN}已配置${NC} (1.1.1.1 / 8.8.8.8 秒级解析)"
     echo -e "  防火墙兼容   :  ${GREEN}已适配${NC} (Docker / UFW / Firewalld 放行)"
+    if [[ "$report_connlimit" == "0" ]]; then
+        echo -e "  并发限制守护 :  ${YELLOW}已关闭${NC}"
+    else
+        echo -e "  并发限制守护 :  ${GREEN}已激活${NC} (单实例最大 ${report_connlimit} 并发，防BT/防测速/防被墙)"
+    fi
     echo -e "  开机自愈守护 :  ${GREEN}已就绪${NC} (incus-network-compat.service)"
     echo -e "  快捷管理命令 :  ${GREEN}incudal${NC}"
     divider
@@ -2857,6 +2941,107 @@ manage_rfw_abuse() {
     "$script_path"
 }
 
+# ========================== 容器并发连接数限制管理 ==========================
+manage_connlimit() {
+    local current_limit="${DEFAULT_CONNLIMIT_MAX}"
+    if [[ -f "$CONNLIMIT_FILE" ]]; then
+        current_limit=$(cat "$CONNLIMIT_FILE" 2>/dev/null | tr -d '[:space:]' || echo "${DEFAULT_CONNLIMIT_MAX}")
+    fi
+
+    while true; do
+        echo ""
+        divider
+        echo -e "  ${BOLD}容器单实例并发连接数限制管理${NC}"
+        echo -e "  ${DIM}基于内核 iptables 限制每个小鸡的最大 TCP+UDP 并发，防止跑 BT/狂暴测速/群租导致 IP 被墙${NC}"
+        echo -e "  当前状态: ${GREEN}$([[ "$current_limit" == "0" ]] && echo "已关闭" || echo "单实例最大 ${current_limit} 并发")${NC}"
+        echo -e "  ${DIM}输入 0 返回主菜单${NC}"
+        divider
+        echo ""
+        echo -e "    ${CYAN}1)${NC} 设为 200 并发  ${GREEN}[当前默认/最严防封]${NC} ─ 严防死守，杜绝BT与多人群租做机场"
+        echo -e "    ${CYAN}2)${NC} 设为 300 并发  ${YELLOW}[黄金平衡]${NC}        ─ 宽裕充沛，兼顾多设备重度使用"
+        echo -e "    ${CYAN}3)${NC} 设为 500 并发  ${BLUE}[宽松模式]${NC}        ─ 适合有大并发需求的高配节点"
+        echo -e "    ${CYAN}4)${NC} 自定义并发数"
+        echo -e "    ${CYAN}5)${NC} 查看当前各小鸡实时并发连接数排名 (Top 10)"
+        echo -e "    ${RED}6)${NC} 关闭并发限制 (设为 0，不推荐)"
+        echo -e "    ${CYAN}0)${NC} 返回主菜单"
+        echo ""
+        echo -ne "  ${BOLD}请输入选项 [0-6]: ${NC}"
+        local choice=""
+        read -r choice || return 0
+        return_to_main_menu_if_requested "$choice"
+
+        case "$choice" in
+            1)
+                echo "200" > "$CONNLIMIT_FILE" 2>/dev/null || true
+                current_limit="200"
+                setup_network_firewall_compat >/dev/null 2>&1 || true
+                log "已设置为 200 并发限制并即时生效"
+                pause_return
+                ;;
+            2)
+                echo "300" > "$CONNLIMIT_FILE" 2>/dev/null || true
+                current_limit="300"
+                setup_network_firewall_compat >/dev/null 2>&1 || true
+                log "已设置为 300 并发限制并即时生效"
+                pause_return
+                ;;
+            3)
+                echo "500" > "$CONNLIMIT_FILE" 2>/dev/null || true
+                current_limit="500"
+                setup_network_firewall_compat >/dev/null 2>&1 || true
+                log "已设置为 500 并发限制并即时生效"
+                pause_return
+                ;;
+            4)
+                echo -ne "  ${BOLD}请输入自定义最大并发数 (50-10000): ${NC}"
+                local custom_val=""
+                read -r custom_val || true
+                return_to_main_menu_if_requested "$custom_val"
+                if [[ "$custom_val" =~ ^[0-9]+$ ]] && [[ "$custom_val" -ge 50 ]] && [[ "$custom_val" -le 10000 ]]; then
+                    echo "$custom_val" > "$CONNLIMIT_FILE" 2>/dev/null || true
+                    current_limit="$custom_val"
+                    setup_network_firewall_compat >/dev/null 2>&1 || true
+                    log "已设置为 ${custom_val} 并发限制并即时生效"
+                else
+                    warn "输入无效，取值范围必须在 50 到 10000 之间"
+                fi
+                pause_return
+                ;;
+            5)
+                echo ""
+                step "正在统计各小鸡容器当前实时并发连接数 (从 /proc/net/nf_conntrack 读取)..."
+                local top_conns=""
+                if [[ -f /proc/net/nf_conntrack ]]; then
+                    top_conns=$(awk '/src=10\.10\./ {for(i=1;i<=NF;i++) if($i~/^src=10\.10\./) {sub("src=","",$i); print $i}}' /proc/net/nf_conntrack 2>/dev/null | sort | uniq -c | sort -nr | head -n 10 || true)
+                fi
+                if [[ -z "$top_conns" ]]; then
+                    info "当前暂无活跃的小鸡外联连接，或 nf_conntrack 不可用"
+                else
+                    echo -e "  ${BOLD}当前并发连接数最多的小鸡 IP 排名：${NC}"
+                    echo -e "  ${DIM}并发数   容器内网IP${NC}"
+                    echo "$top_conns" | while read -r count c_ip; do
+                        echo -e "   ${CYAN}${count}${NC}      ${c_ip}"
+                    done
+                fi
+                pause_return
+                ;;
+            6)
+                echo "0" > "$CONNLIMIT_FILE" 2>/dev/null || true
+                current_limit="0"
+                setup_network_firewall_compat >/dev/null 2>&1 || true
+                warn "已关闭容器单实例并发限制"
+                pause_return
+                ;;
+            0)
+                return 0
+                ;;
+            *)
+                warn "无效选项，请重新选择"
+                ;;
+        esac
+    done
+}
+
 # ========================== 卸载功能 ==========================
 
 # 卸载确认（双重确认，防止误操作）
@@ -3342,6 +3527,7 @@ main() {
                 echo "  --port <PORT>           自定义 Incus 运行端口 (默认 8443)"
                 echo "  --repair, --fix         一键体检并无损修复母机网络、MTU、DNS、防火墙及已有实例"
                 echo "  --rfw, --rfw-host       一键开启母鸡防火墙 (屏蔽大陆违规流量/全网卡兼容)"
+                echo "  --connlimit <N>         设置单容器最大并发连接数 (默认 200，0 为关闭)"
                 echo "  --uninstall             卸载 Incus 节点并还原系统"
                 echo "  --agent                 打开 Agent 安装 / 更新菜单"
                 echo "  --update-script         更新管理脚本和 incudal 快捷命令"
@@ -3350,10 +3536,13 @@ main() {
                 echo "交互模式: sudo bash $0"
                 echo "命令行:   sudo bash $0 --mode nat --token <YOUR_TOKEN> --port 10001"
                 echo "一键修复: curl -sSL <URL> | sudo bash -s -- --repair"
+                echo "设置并发: curl -sSL <URL> | sudo bash -s -- --connlimit 200"
                 echo "母鸡防火墙: curl -sSL <URL> | sudo bash -s -- --rfw"
                 echo "卸载:     sudo bash $0 --uninstall"
                 exit 0
                 ;;
+            --connlimit)
+                ACTION="connlimit"; CONNLIMIT_MAX="$2"; shift 2 ;;
             *)
                 error "未知参数: $1"
                 echo -e "  ${DIM}使用 --help 查看帮助${NC}"
@@ -3387,6 +3576,20 @@ main() {
     fi
     if [[ "$ACTION" == "rfw" ]]; then
         install_rfw
+        exit 0
+    fi
+    if [[ "$ACTION" == "connlimit" ]]; then
+        if [[ ! "$CONNLIMIT_MAX" =~ ^[0-9]+$ ]]; then
+            error "并发限制参数必须为非负整数"
+            exit 1
+        fi
+        echo "$CONNLIMIT_MAX" > "$CONNLIMIT_FILE" 2>/dev/null || true
+        setup_network_firewall_compat >/dev/null 2>&1 || true
+        if [[ "$CONNLIMIT_MAX" == "0" ]]; then
+            log "已关闭容器单实例并发限制"
+        else
+            log "容器并发限制已成功更新为: 单实例最大 ${CONNLIMIT_MAX} 并发 (已即时生效)"
+        fi
         exit 0
     fi
 
@@ -3475,6 +3678,7 @@ main() {
                 9)  do_repair_host || true; pause_return; continue ;;
                 10) manage_rfw_abuse || true; continue ;;
                 11) update_install_script || true; continue ;;
+                12) manage_connlimit || true; continue ;;
                 0)  info "再见！"; exit 0 ;;
                 *)  warn "无效选项，请重新选择"; continue ;;
             esac
