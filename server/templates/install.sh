@@ -2667,8 +2667,16 @@ case "$action" in
 esac
 QUIC_EOF
         chmod +x "${RFW_INSTALL_DIR}/quic-shield.sh"
-        quic_exec_post="ExecStartPost=${RFW_INSTALL_DIR}/quic-shield.sh start"
+        quic_exec_pre="ExecStartPre=${RFW_INSTALL_DIR}/quic-shield.sh start"
         quic_exec_stop="ExecStopPost=${RFW_INSTALL_DIR}/quic-shield.sh stop"
+    fi
+
+    # 预先下载 GeoIP 缓存，防止启动时网络波动导致失败
+    if [[ -n "$target_countries" ]]; then
+        info "预下载 GeoIP 缓存..."
+        curl -sSL -m 10 "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/text/cn.txt" -o "${RFW_INSTALL_DIR}/geoip_cn.txt" 2>/dev/null || \
+        curl -sSL -m 10 "https://raw.githubusercontent.com/Loyalsoldier/geoip/refs/heads/release/text/cn.txt" -o "${RFW_INSTALL_DIR}/geoip_cn.txt" 2>/dev/null || true
+        [[ -f "${RFW_INSTALL_DIR}/geoip_cn.txt" ]] && cp -f "${RFW_INSTALL_DIR}/geoip_cn.txt" "${RFW_INSTALL_DIR}/cn.txt" 2>/dev/null || true
     fi
 
     cat > "$RFW_SERVICE_FILE" <<EOF
@@ -2681,11 +2689,11 @@ Wants=network-online.target
 Type=simple
 User=root
 Environment=RUST_LOG=info
+${quic_exec_pre}
 ExecStart=${RFW_INSTALL_DIR}/rfw --iface ${selected_interface}${RFW_ARGS}
-${quic_exec_post}
 ${quic_exec_stop}
 Restart=always
-RestartSec=5
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target
