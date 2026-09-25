@@ -2705,7 +2705,7 @@ install_rfw() {
     # 创建 systemd 服务
     step "配置 RFW 服务..."
 
-    local quic_exec_post=""
+    local quic_exec_pre=""
     local quic_exec_stop=""
     if [[ "$RFW_ARGS" =~ "--block-quic" ]]; then
         cat > "${RFW_INSTALL_DIR}/quic-shield.sh" << 'QUIC_EOF'
@@ -2756,11 +2756,26 @@ QUIC_EOF
     fi
 
     # 预先下载 GeoIP 缓存，防止启动时网络波动导致失败
-    if [[ -n "$target_countries" ]]; then
-        info "预下载 GeoIP 缓存..."
-        curl -sSL -m 10 "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/text/cn.txt" -o "${RFW_INSTALL_DIR}/geoip_cn.txt" 2>/dev/null || \
-        curl -sSL -m 10 "https://raw.githubusercontent.com/Loyalsoldier/geoip/refs/heads/release/text/cn.txt" -o "${RFW_INSTALL_DIR}/geoip_cn.txt" 2>/dev/null || true
-        [[ -f "${RFW_INSTALL_DIR}/geoip_cn.txt" ]] && cp -f "${RFW_INSTALL_DIR}/geoip_cn.txt" "${RFW_INSTALL_DIR}/cn.txt" 2>/dev/null || true
+    local target_countries=""
+    if [[ "$RFW_ARGS" =~ --(countries|block-all-from|allow-only-countries)[[:space:]=]+([A-Za-z,]+) ]]; then
+        target_countries="${BASH_REMATCH[2]}"
+    fi
+
+    if [[ -n "${target_countries:-}" ]]; then
+        info "预下载 GeoIP 缓存 (${target_countries})..."
+        local c c_lower
+        local IFS=','
+        for c in $target_countries; do
+            c_lower=$(echo "$c" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+            [[ -z "$c_lower" ]] && continue
+            if [[ ! -f "${RFW_INSTALL_DIR}/geoip_${c_lower}.txt" || ! -s "${RFW_INSTALL_DIR}/geoip_${c_lower}.txt" ]]; then
+                curl -sSL -m 10 "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/text/${c_lower}.txt" -o "${RFW_INSTALL_DIR}/geoip_${c_lower}.txt" 2>/dev/null || \
+                curl -sSL -m 10 "https://raw.githubusercontent.com/Loyalsoldier/geoip/refs/heads/release/text/${c_lower}.txt" -o "${RFW_INSTALL_DIR}/geoip_${c_lower}.txt" 2>/dev/null || true
+            fi
+            if [[ -f "${RFW_INSTALL_DIR}/geoip_${c_lower}.txt" && -s "${RFW_INSTALL_DIR}/geoip_${c_lower}.txt" ]]; then
+                cp -f "${RFW_INSTALL_DIR}/geoip_${c_lower}.txt" "${RFW_INSTALL_DIR}/${c_lower}.txt" 2>/dev/null || true
+            fi
+        done
     fi
 
     cat > "$RFW_SERVICE_FILE" <<EOF
