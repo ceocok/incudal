@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Incudal - RFW 防火墙防滥用扩展脚本 (RFW Abuse Shield)
-# 功能：屏蔽 测速 (Speedtest/iPerf) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 (reinstall.sh/InstallNET/OsMutation)
+# 功能：屏蔽 测速 (Speedtest/iPerf/cf-probe) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板 (x-ui/3x-ui/s-ui)
 # 作用域：FORWARD (容器与NAT VPS实例) + OUTPUT (宿主机本身) + INPUT (入站P2P探针)
 # 支持：IPv4 (iptables) + IPv6 (ip6tables) 双栈
 # ==============================================================================
 
 set -e
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 INSTALL_PATH="/usr/local/bin/rfw-abuse"
 SERVICE_PATH="/etc/systemd/system/rfw-abuse.service"
 
@@ -98,7 +98,7 @@ has_ipv6() {
 # 独立 DD 域名黑洞（dnsmasq 继承宿主机 /etc/hosts，容器解析即黑洞）
 apply_dd_dns_sinkhole() {
     local marker="# Incudal Anti-DD Sinkhole"
-    local domains="moeclub.org cx9208.com iso.qaq.wiki leitbogioro.org images.linuxcontainers.org"
+    local domains="moeclub.org cx9208.com iso.qaq.wiki leitbogioro.org"
     if ! grep -q "$marker" /etc/hosts 2>/dev/null; then
         {
             echo "$marker"
@@ -114,18 +114,45 @@ clean_dd_dns_sinkhole() {
     fi
 }
 
-# 宿主机实时反 DD 与违规代理守护进程（秒级击毙容器内运行的 DD 脚本与 MTProto 代理）
+# 宿主机实时反滥用与违规代理守护进程（秒级击毙容器内运行的 DD 脚本、MTProto 代理与 x-ui/3x-ui/s-ui 面板）
 apply_antidd_daemon() {
-    cat > /usr/local/bin/rfw-antidd-daemon << 'EOF'
+    local enable_dd="${1:-true}"
+    local enable_mt="${2:-true}"
+    local enable_panel="${3:-true}"
+
+    # 若三项均未开启，则停用守护服务
+    if [[ "$enable_dd" != "true" && "$enable_mt" != "true" && "$enable_panel" != "true" ]]; then
+        stop_antidd_daemon
+        return 0
+    fi
+
+    # 动态组装进程匹配正则
+    local patterns=()
+    if [[ "$enable_dd" == "true" ]]; then
+        patterns+=("OsMutation|reinstall\\.sh|InstallNET|NewReinstall|debi\\.sh|clean-vps|G-Reinstall")
+    fi
+    if [[ "$enable_mt" == "true" ]]; then
+        patterns+=("(^|[ /])(mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)")
+    fi
+    if [[ "$enable_panel" == "true" ]]; then
+        patterns+=("(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\\.sh|3x-ui\\.sh|s-ui\\.sh")
+    fi
+    # 违规测速与探针进程 (cf-probe / CloudflareSpeedTest)
+    patterns+=("(^|[ /])(cf-probe|CloudflareSpeedTest|cf-speedtest)([[:space:]]|$)|cf-probe\\.sh")
+
+    local combined_pattern
+    combined_pattern=$(IFS='|'; echo "${patterns[*]}")
+
+    cat > /usr/local/bin/rfw-antidd-daemon << EOF
 #!/usr/bin/env bash
-# Incudal Anti-Abuse Real-Time Process Killer (Anti-DD & Anti-MTProto)
-PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|/mtg\b|mtg run|mtproto-proxy|teleproxy|mtp-proxy|mtproxy"
+# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels & cf-probe)
+PATTERN="${combined_pattern}"
 while true; do
     # 扫描属于容器命名空间的进程 (UID >= 1000000 属于 Incus 映射的用户命名空间)
-    pids=$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="$PATTERN" '$1 >= 1000000 && $0 ~ pat && $0 !~ /rfw-antidd/ {print $2}')
-    for p in $pids; do
-        if kill -9 "$p" 2>/dev/null; then
-            logger -t rfw-antidd "Killed rogue container process (Anti-DD/MTProto): PID $p"
+    pids=\$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="\$PATTERN" '\$1 >= 1000000 && \$0 ~ pat && \$0 !~ /rfw-antidd/ {print \$2}')
+    for p in \$pids; do
+        if kill -9 "\$p" 2>/dev/null; then
+            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/cf-probe): PID \$p"
         fi
     done
     sleep 0.5
@@ -135,7 +162,7 @@ EOF
 
     cat > /etc/systemd/system/rfw-antidd.service << 'EOF'
 [Unit]
-Description=Incudal Anti-Abuse Real-Time Process Killer (DD & MTProto)
+Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels & cf-probe)
 After=incus.service
 
 [Service]
@@ -149,7 +176,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable --now rfw-antidd.service >/dev/null 2>&1 || true
-    log "已启动宿主机反违规代理与反 DD 进程秒级巡检守护服务 (rfw-antidd)"
+    log "已启动宿主机反滥用违规进程 (DD/MTProto/代理面板/cf-probe) 秒级巡检守护服务 (rfw-antidd)"
 }
 
 stop_antidd_daemon() {
@@ -159,42 +186,86 @@ stop_antidd_daemon() {
     systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
-# 容器内文件锁：破坏 OsMutation 与 MTProto 代理的安装与执行工作流
+# 容器内文件锁：破坏 OsMutation、MTProto、x-ui/3x-ui/s-ui 面板与 cf-probe 的安装与执行工作流
 apply_container_traps() {
+    local enable_dd="${1:-true}"
+    local enable_mt="${2:-true}"
+    local enable_panel="${3:-true}"
+
     command -v incus >/dev/null 2>&1 || return 0
     local containers
     containers=$(incus list status=running type=container -c n --format csv 2>/dev/null || true)
     local count=0
     for ct in $containers; do
         [[ -z "$ct" ]] && continue
-        # 1. 锁死 /x，使 mkdir /x 彻底失败，无法作为 rootfs 工作区与挂载点
-        incus exec "$ct" -- sh -c 'touch /x 2>/dev/null && chmod 000 /x 2>/dev/null && chattr +i /x 2>/dev/null || true' 2>/dev/null || true
-        # 2. 占位 DD 脚本文件直接 exit 1
+        # 1. 锁死 /x，破坏 DD 脚本工作区
+        if [[ "$enable_dd" == "true" ]]; then
+            incus exec "$ct" -- sh -c 'touch /x 2>/dev/null && chmod 000 /x 2>/dev/null && chattr +i /x 2>/dev/null || true' 2>/dev/null || true
+            incus exec "$ct" -- sh -c '
+                for f in /root/OsMutation.sh /root/reinstall.sh /root/InstallNET.sh /root/NewReinstall.sh /usr/local/bin/OsMutation.sh; do
+                    if [ ! -f "$f" ]; then
+                        echo "#!/bin/sh" > "$f" 2>/dev/null
+                        echo "echo \"\033[1;31m[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！\033[0m\"" >> "$f" 2>/dev/null
+                        echo "exit 1" >> "$f" 2>/dev/null
+                        chmod 755 "$f" 2>/dev/null || true
+                    fi
+                done
+            ' 2>/dev/null || true
+        fi
+        # 2. 拦截并占位 MTProto 代理二进制文件
+        if [[ "$enable_mt" == "true" ]]; then
+            incus exec "$ct" -- sh -c '
+                for f in /usr/local/bin/mtg /usr/bin/mtg /usr/local/bin/mtproto-proxy /usr/bin/mtproto-proxy; do
+                    if [ ! -f "$f" ]; then
+                        echo "#!/bin/sh" > "$f" 2>/dev/null
+                        echo "echo \"\033[1;31m[错误] 本节点严禁运行 Telegram MTProto 代理服务！\033[0m\"" >> "$f" 2>/dev/null
+                        echo "exit 1" >> "$f" 2>/dev/null
+                        chmod 755 "$f" 2>/dev/null || true
+                    fi
+                done
+            ' 2>/dev/null || true
+        fi
+        # 3. 拦截并占位 x-ui / 3x-ui / s-ui / v2-ui 面板主程序与命令
+        if [[ "$enable_panel" == "true" ]]; then
+            incus exec "$ct" -- sh -c '
+                for d in /usr/local/x-ui /usr/local/3x-ui /usr/local/s-ui /usr/local/v2-ui; do
+                    if [ ! -d "$d" ]; then
+                        mkdir -p "$d" 2>/dev/null || true
+                    fi
+                done
+                for f in /usr/local/x-ui/x-ui /usr/local/3x-ui/3x-ui /usr/local/s-ui/s-ui /usr/local/v2-ui/v2-ui /usr/bin/x-ui /usr/bin/3x-ui /usr/bin/s-ui /usr/bin/v2-ui; do
+                    if [ ! -f "$f" ]; then
+                        echo "#!/bin/sh" > "$f" 2>/dev/null
+                        echo "echo \"\033[1;31m[错误] 本节点严禁运行 x-ui / 3x-ui / s-ui 等代理面板服务！\033[0m\"" >> "$f" 2>/dev/null
+                        echo "exit 1" >> "$f" 2>/dev/null
+                        chmod 755 "$f" 2>/dev/null || true
+                    fi
+                done
+            ' 2>/dev/null || true
+        fi
+        # 4. 拦截并占位 cf-probe / Cloudflare 测速与探测程序，停用常驻服务
         incus exec "$ct" -- sh -c '
-            for f in /root/OsMutation.sh /root/reinstall.sh /root/InstallNET.sh /root/NewReinstall.sh /usr/local/bin/OsMutation.sh; do
-                if [ ! -f "$f" ]; then
+            for f in /usr/local/bin/cf-probe /usr/bin/cf-probe /usr/local/bin/CloudflareSpeedTest /usr/bin/CloudflareSpeedTest; do
+                if [ -f "$f" ] || [ ! -e "$f" ]; then
                     echo "#!/bin/sh" > "$f" 2>/dev/null
-                    echo "echo \"\033[1;31m[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！\033[0m\"" >> "$f" 2>/dev/null
+                    echo "echo \"\033[1;31m[错误] 本节点严禁运行 cf-probe / Cloudflare 测速探针服务！\033[0m\"" >> "$f" 2>/dev/null
                     echo "exit 1" >> "$f" 2>/dev/null
                     chmod 755 "$f" 2>/dev/null || true
                 fi
             done
-        ' 2>/dev/null || true
-        # 3. 拦截并占位 MTProto 代理二进制文件
-        incus exec "$ct" -- sh -c '
-            for f in /usr/local/bin/mtg /usr/bin/mtg /usr/local/bin/mtproto-proxy /usr/bin/mtproto-proxy; do
-                if [ ! -f "$f" ]; then
-                    echo "#!/bin/sh" > "$f" 2>/dev/null
-                    echo "echo \"\033[1;31m[错误] 本节点严禁运行 Telegram MTProto 代理服务！\033[0m\"" >> "$f" 2>/dev/null
-                    echo "exit 1" >> "$f" 2>/dev/null
-                    chmod 755 "$f" 2>/dev/null || true
-                fi
-            done
+            if [ -f /etc/init.d/cf-probe ]; then
+                rc-service cf-probe stop 2>/dev/null || true
+                rc-update del cf-probe default 2>/dev/null || true
+            fi
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl stop cf-probe 2>/dev/null || true
+                systemctl disable cf-probe 2>/dev/null || true
+            fi
         ' 2>/dev/null || true
         count=$((count+1))
     done
     if [ "$count" -gt 0 ]; then
-        log "已为当前运行的 $count 个容器布署防 DD 与防 MTProto 物理工作区锁"
+        log "已为当前运行的 $count 个容器布署防 DD / 防 MTProto / 防代理面板 / 防 cf-probe 物理工作区锁"
     fi
 }
 
@@ -233,6 +304,7 @@ apply_rules() {
     local enable_bench="${4:-true}"
     local enable_antidd="${5:-true}"
     local enable_mtproto="${6:-true}"
+    local enable_proxypanel="${7:-true}"
 
     check_dependencies
     clean_rules
@@ -293,6 +365,8 @@ apply_rules() {
             "speedtest.cn"
             "fast.com"
             "speed.cloudflare.com"
+            "cf-probe"
+            "CloudflareSpeedTest"
             "ookla"
             "test.ustc.edu.cn"
             "10000.gd.cn"
@@ -484,15 +558,9 @@ apply_rules() {
 
         # 宿主机 hosts 域名黑洞（Incus 网桥 dnsmasq 默认读取 /etc/hosts，容器解析即黑洞）
         apply_dd_dns_sinkhole
-
-        # 启动宿主机实时击毙守护与容器物理工作区锁
-        apply_antidd_daemon
-        apply_container_traps
-
-        log "DD重装拦截全维体系（实时进程击毙 + 容器目录锁 + DPI + DNS黑洞）已生效"
+        log "DD重装脚本拦截规则已生效"
     else
         clean_dd_dns_sinkhole
-        stop_antidd_daemon
     fi
 
     # ========================== 8. 屏蔽 Telegram MTProto 代理 (Anti-MTProto) ==========================
@@ -520,14 +588,42 @@ apply_rules() {
         log "Telegram MTProto 代理拦截规则已生效"
     fi
 
-    # ========================== 9. 链尾部安全放行 ==========================
+    # ========================== 9. 屏蔽代理面板安装与分发 (Anti-ProxyPanel) ==========================
+    if [[ "$enable_proxypanel" == "true" ]]; then
+        info "正在加载【代理面板拦截】规则 (x-ui / 3x-ui / s-ui / v2-ui)..."
+        local panel_keywords=(
+            "vaxilu/x-ui"
+            "MHSanaei/3x-ui"
+            "FranzKafkaYu/x-ui"
+            "alireza0/s-ui"
+            "sprov0/v2-ui"
+            "x-ui/releases/download"
+            "3x-ui/releases/download"
+            "s-ui/releases/download"
+            "x-ui-linux"
+            "s-ui-linux"
+        )
+        for kw in "${panel_keywords[@]}"; do
+            iptables -A "$CHAIN_V4" -m string --string "$kw" --algo bm --to 1500 -j DROP 2>/dev/null || true
+            if has_ipv6; then
+                ip6tables -A "$CHAIN_V6" -m string --string "$kw" --algo bm --to 1500 -j DROP 2>/dev/null || true
+            fi
+        done
+        log "代理面板 (x-ui/3x-ui/s-ui) 拦截规则已生效"
+    fi
+
+    # ========================== 10. 激活秒级违规进程查杀守护与容器工作区锁 ==========================
+    apply_antidd_daemon "$enable_antidd" "$enable_mtproto" "$enable_proxypanel"
+    apply_container_traps "$enable_antidd" "$enable_mtproto" "$enable_proxypanel"
+
+    # ========================== 11. 链尾部安全放行 ==========================
     # 任何未被违规特征命中的正常流量，安全返回系统常规转发链
     iptables -A "$CHAIN_V4" -j RETURN
     if has_ipv6; then
         ip6tables -A "$CHAIN_V6" -j RETURN
     fi
 
-    # ========================== 10. 挂载到系统内核链最前端 ==========================
+    # ========================== 12. 挂载到系统内核链最前端 ==========================
     # FORWARD (覆盖所有 Incus 容器与 NAT VPS 实例流量)
     iptables -I FORWARD 1 -j "$CHAIN_V4"
     # OUTPUT (覆盖宿主机自身发起的流量)
@@ -541,7 +637,7 @@ apply_rules() {
         ip6tables -I INPUT 1 -j "$CHAIN_V6"
     fi
 
-    # ========================== 11. 开机持久化服务配置 ==========================
+    # ========================== 13. 开机持久化服务配置 ==========================
     setup_persistence
 }
 
@@ -652,7 +748,7 @@ show_menu() {
     echo ""
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}       ${BOLD}Incudal - RFW 防滥用防火墙 (Abuse Shield) v${SCRIPT_VERSION}${NC}        ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${DIM}拦截违规测速 / 恶意挖矿 / BT下载 / 跑分压测 / DD重装 / MTProto · 保护母机与NAT VPS${NC}  ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${DIM}拦截违规测速 / 恶意挖矿 / BT下载 / 跑分压测 / DD重装 / MTProto / 代理面板 · 保护母机与NAT VPS${NC}  ${CYAN}║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
@@ -665,8 +761,8 @@ show_menu() {
     divider
     echo -e "  ${BOLD}请选择操作：${NC}"
     echo ""
-    echo -e "    ${GREEN}1)${NC}  一键开启全量防护  ${DIM}─  屏蔽 测速 + 挖矿 + BT/P2P + 跑分压测 + DD重装 + MTProto代理 (强烈推荐)${NC}"
-    echo -e "    ${CYAN}2)${NC}  自定义选择防护项  ${DIM}─  自由勾选开启测速、挖矿、BT、跑分、DD重装或MTProto代理${NC}"
+    echo -e "    ${GREEN}1)${NC}  一键开启全量防护  ${DIM}─  屏蔽 测速 + 挖矿 + BT/P2P + 跑分压测 + DD重装 + MTProto代理 + 代理面板(x-ui/3x-ui/s-ui) (强烈推荐)${NC}"
+    echo -e "    ${CYAN}2)${NC}  自定义选择防护项  ${DIM}─  自由勾选开启测速、挖矿、BT、跑分、DD重装、MTProto或代理面板${NC}"
     echo -e "    ${CYAN}3)${NC}  查看拦截统计状态  ${DIM}─  查看实时命中数据包与流量${NC}"
     echo -e "    ${YELLOW}4)${NC}  停止防护 (清除规则) ${DIM}─  临时停用拦截，保留自愈脚本${NC}"
     echo -e "    ${RED}5)${NC}  彻底卸载          ${DIM}─  移除守护服务与防火墙脚本${NC}"
@@ -678,14 +774,14 @@ show_menu() {
     case "$choice" in
         1)
             echo ""
-            apply_rules "true" "true" "true" "true" "true" "true"
+            apply_rules "true" "true" "true" "true" "true" "true" "true"
             echo ""
             log "全量防护已成功开启并配置开机自愈！"
             ;;
         2)
             echo ""
             echo -e "  ${DIM}以下每一步输入 0 可返回上级菜单${NC}"
-            local opt_speed="" opt_mine="" opt_bt="" opt_bench="" opt_dd="" opt_mtproto=""
+            local opt_speed="" opt_mine="" opt_bt="" opt_bench="" opt_dd="" opt_mtproto="" opt_proxypanel=""
             safe_read "  是否屏蔽测速 (Speedtest/iPerf/Fast)？[Y/n]: " opt_speed
             [[ "$opt_speed" == "0" ]] && return 0
             local b_speed="true"
@@ -716,8 +812,13 @@ show_menu() {
             local b_mtproto="true"
             [[ "${opt_mtproto:-Y}" =~ ^[nN]$ ]] && b_mtproto="false"
 
+            safe_read "  是否屏蔽代理面板服务 (x-ui/3x-ui/s-ui/v2-ui/防封禁)？[Y/n]: " opt_proxypanel
+            [[ "$opt_proxypanel" == "0" ]] && return 0
+            local b_proxypanel="true"
+            [[ "${opt_proxypanel:-Y}" =~ ^[nN]$ ]] && b_proxypanel="false"
+
             echo ""
-            apply_rules "$b_speed" "$b_mine" "$b_bt" "$b_bench" "$b_dd" "$b_mtproto"
+            apply_rules "$b_speed" "$b_mine" "$b_bt" "$b_bench" "$b_dd" "$b_mtproto" "$b_proxypanel"
             echo ""
             log "自定义防护规则已成功应用！"
             ;;
@@ -739,7 +840,7 @@ show_menu() {
 
 # 主入口解析
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    echo "用法: $0 [start|stop|status|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only]"
+    echo "用法: $0 [start|stop|status|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only]"
     exit 0
 fi
 
@@ -748,12 +849,12 @@ check_root
 case "${1:-}" in
     start|apply|enable)
         if [[ "${2:-}" == "--silent" ]]; then
-            apply_rules "true" "true" "true" "true" "true" "true" >/dev/null 2>&1
+            apply_rules "true" "true" "true" "true" "true" "true" "true" >/dev/null 2>&1
         else
             echo ""
-            apply_rules "true" "true" "true" "true" "true" "true"
+            apply_rules "true" "true" "true" "true" "true" "true" "true"
             echo ""
-            log "RFW 防滥用规则（测速/挖矿/BT/性能跑分/DD重装/MTProto代理）已成功启动！"
+            log "RFW 防滥用规则（测速/挖矿/BT/性能跑分/DD重装/MTProto/代理面板）已成功启动！"
         fi
         ;;
     stop|clear|disable)
@@ -770,28 +871,31 @@ case "${1:-}" in
         uninstall
         ;;
     --all)
-        apply_rules "true" "true" "true" "true" "true" "true"
+        apply_rules "true" "true" "true" "true" "true" "true" "true"
         ;;
     --speedtest-only)
-        apply_rules "true" "false" "false" "false" "false" "false"
+        apply_rules "true" "false" "false" "false" "false" "false" "false"
         ;;
     --mining-only)
-        apply_rules "false" "true" "false" "false" "false" "false"
+        apply_rules "false" "true" "false" "false" "false" "false" "false"
         ;;
     --bt-only)
-        apply_rules "false" "false" "true" "false" "false" "false"
+        apply_rules "false" "false" "true" "false" "false" "false" "false"
         ;;
     --benchmark-only|--bench-only)
-        apply_rules "false" "false" "false" "true" "false" "false"
+        apply_rules "false" "false" "false" "true" "false" "false" "false"
         ;;
     --antidd-only|--anti-dd-only)
-        apply_rules "false" "false" "false" "false" "true" "false"
+        apply_rules "false" "false" "false" "false" "true" "false" "false"
         ;;
     --mtproto-only|--anti-mtproto-only)
-        apply_rules "false" "false" "false" "false" "false" "true"
+        apply_rules "false" "false" "false" "false" "false" "true" "false"
+        ;;
+    --proxypanel-only|--panel-only|--anti-panel-only)
+        apply_rules "false" "false" "false" "false" "false" "false" "true"
         ;;
     --help|-h)
-        echo "用法: $0 [start|stop|status|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only]"
+        echo "用法: $0 [start|stop|status|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only]"
         exit 0
         ;;
     *)

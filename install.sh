@@ -484,7 +484,7 @@ show_system_info() {
 
     # 检查 RFW 防滥用扩展状态
     if command -v /usr/local/bin/rfw-abuse >/dev/null 2>&1 && iptables -L RFW_ABUSE -n >/dev/null 2>&1; then
-        echo -e "  RFW 防滥用:  ${GREEN}运行中${NC} (屏蔽测速/挖矿/BT/DD系统生效中)"
+        echo -e "  RFW 防滥用:  ${GREEN}运行中${NC} (屏蔽测速/挖矿/BT/DD/MTProto/代理面板生效中)"
     elif [[ -f /usr/local/bin/rfw-abuse ]]; then
         echo -e "  RFW 防滥用:  ${YELLOW}已安装（未运行）${NC}"
     fi
@@ -1881,16 +1881,16 @@ EOF
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now incus-network-compat.service 2>/dev/null || true
 
-    # 6. 配置容器违规进程秒级击毙守护服务 (实时击毙 MTProto/MTG 代理与系统 DD 脚本，防止母机被墙/被毁)
+    # 6. 配置容器违规进程秒级击毙守护服务 (实时击毙 MTProto/MTG 代理、x-ui/3x-ui/s-ui 代理面板、cf-probe 探针与系统 DD 脚本，防止母机被墙/被毁)
     cat > /usr/local/bin/incudal-rogue-killer.sh <<'KILLER_EOF'
 #!/usr/bin/env bash
-# Incudal Rogue Process Killer (MTProto Proxies & System DD Scripts)
-PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|/mtg\b|mtg run|mtproto-proxy|teleproxy|mtp-proxy|mtproxy"
+# Incudal Rogue Process Killer (MTProto, ProxyPanels x-ui/3x-ui/s-ui, cf-probe & System DD Scripts)
+PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|(^|[ /])(cf-probe|CloudflareSpeedTest|cf-speedtest|mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)|(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\.sh|3x-ui\.sh|s-ui\.sh|cf-probe\.sh"
 while true; do
     pids=$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="$PATTERN" '$1 >= 1000000 && $0 ~ pat && $0 !~ /rogue-killer/ {print $2}')
     for p in $pids; do
         if kill -9 "$p" 2>/dev/null; then
-            logger -t incudal-rogue-killer "Killed unauthorized container process (MTProto/DD): PID $p"
+            logger -t incudal-rogue-killer "Killed unauthorized container process (Panel/MTProto/cf-probe/DD): PID $p"
         fi
     done
     sleep 1
@@ -1900,7 +1900,7 @@ KILLER_EOF
 
     cat > /etc/systemd/system/incudal-rogue-killer.service <<'KILLER_SVC_EOF'
 [Unit]
-Description=Incudal Rogue Process Killer (MTProto & DD Blocker)
+Description=Incudal Rogue Process Killer (MTProto, ProxyPanels, cf-probe & DD Blocker)
 After=incus.service
 Wants=incus.service
 
@@ -2996,11 +2996,11 @@ do_rfw_cleanup() {
     log "RFW 防火墙已卸载"
 }
 
-# ========================== RFW 防滥用管理 (测速/挖矿/BT/DD系统) ==========================
+# ========================== RFW 防滥用管理 (测速/挖矿/BT/DD/MTProto/代理面板) ==========================
 manage_rfw_abuse() {
     echo ""
     divider
-    echo -e "  ${BOLD}RFW 防滥用防火墙 (屏蔽测速/挖矿/BT/DD系统)${NC}"
+    echo -e "  ${BOLD}RFW 防滥用防火墙 (屏蔽测速/挖矿/BT/DD/MTProto/代理面板)${NC}"
     divider
     echo ""
 
