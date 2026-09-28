@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Incudal - RFW 防火墙防滥用扩展脚本 (RFW Abuse Shield)
-# 功能：屏蔽 测速 (Speedtest/iPerf/cf-probe) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板 (x-ui/3x-ui/s-ui)
+# 功能：屏蔽 测速 (Speedtest/iPerf/CloudflareSpeedTest) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板 (x-ui/3x-ui/s-ui)
 # 作用域：FORWARD (容器与NAT VPS实例) + OUTPUT (宿主机本身) + INPUT (入站P2P探针)
 # 支持：IPv4 (iptables) + IPv6 (ip6tables) 双栈
 # ==============================================================================
 
 set -e
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 INSTALL_PATH="/usr/local/bin/rfw-abuse"
 SERVICE_PATH="/etc/systemd/system/rfw-abuse.service"
 
@@ -137,32 +137,39 @@ apply_antidd_daemon() {
     if [[ "$enable_panel" == "true" ]]; then
         patterns+=("(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\\.sh|3x-ui\\.sh|s-ui\\.sh")
     fi
-    # 违规测速与探针进程 (cf-probe / CloudflareSpeedTest)
-    patterns+=("(^|[ /])(cf-probe|CloudflareSpeedTest|cf-speedtest)([[:space:]]|$)|cf-probe\\.sh")
+    # 违规测速与优选进程 (CloudflareSpeedTest / cf-speedtest)
+    patterns+=("(^|[ /])(CloudflareSpeedTest|cf-speedtest)([[:space:]]|$)")
+    # 自动化浏览器与注册机爬虫进程 (chrome/chromium/chromedriver/selenium/playwright/puppeteer)
+    patterns+=("(^|[ /])(chrome|chromium|chromedriver|geckodriver|selenium|playwright|puppeteer)([[:space:]]|$)")
 
     local combined_pattern
     combined_pattern=$(IFS='|'; echo "${patterns[*]}")
 
     cat > /usr/local/bin/rfw-antidd-daemon << EOF
 #!/usr/bin/env bash
-# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels & cf-probe)
+# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels & Bot/Browser)
 PATTERN="${combined_pattern}"
 while true; do
     # 扫描属于容器命名空间的进程 (UID >= 1000000 属于 Incus 映射的用户命名空间)
     pids=\$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="\$PATTERN" '\$1 >= 1000000 && \$0 ~ pat && \$0 !~ /rfw-antidd/ {print \$2}')
     for p in \$pids; do
         if kill -9 "\$p" 2>/dev/null; then
-            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/cf-probe): PID \$p"
+            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Bot/Browser): PID \$p"
         fi
     done
-    sleep 0.5
+    sleep 60
 done
 EOF
     chmod +x /usr/local/bin/rfw-antidd-daemon
 
+    # 清理历史可能遗留的 incudal-rogue-killer 重复服务
+    systemctl stop incudal-rogue-killer.service 2>/dev/null || true
+    systemctl disable incudal-rogue-killer.service 2>/dev/null || true
+    rm -f /etc/systemd/system/incudal-rogue-killer.service /usr/local/bin/incudal-rogue-killer.sh 2>/dev/null || true
+
     cat > /etc/systemd/system/rfw-antidd.service << 'EOF'
 [Unit]
-Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels & cf-probe)
+Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto & ProxyPanels)
 After=incus.service
 
 [Service]
@@ -176,17 +183,20 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable --now rfw-antidd.service >/dev/null 2>&1 || true
-    log "已启动宿主机反滥用违规进程 (DD/MTProto/代理面板/cf-probe) 秒级巡检守护服务 (rfw-antidd)"
+    log "已启动宿主机反滥用违规进程 (DD/MTProto/代理面板) 秒级巡检守护服务 (rfw-antidd)"
 }
 
 stop_antidd_daemon() {
     systemctl stop rfw-antidd.service 2>/dev/null || true
     systemctl disable rfw-antidd.service 2>/dev/null || true
     rm -f /etc/systemd/system/rfw-antidd.service /usr/local/bin/rfw-antidd-daemon 2>/dev/null || true
+    systemctl stop incudal-rogue-killer.service 2>/dev/null || true
+    systemctl disable incudal-rogue-killer.service 2>/dev/null || true
+    rm -f /etc/systemd/system/incudal-rogue-killer.service /usr/local/bin/incudal-rogue-killer.sh 2>/dev/null || true
     systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
-# 容器内文件锁：破坏 OsMutation、MTProto、x-ui/3x-ui/s-ui 面板与 cf-probe 的安装与执行工作流
+# 容器内文件锁：破坏 OsMutation、MTProto、x-ui/3x-ui/s-ui 面板与 CloudflareSpeedTest 的安装与执行工作流
 apply_container_traps() {
     local enable_dd="${1:-true}"
     local enable_mt="${2:-true}"
@@ -243,29 +253,26 @@ apply_container_traps() {
                 done
             ' 2>/dev/null || true
         fi
-        # 4. 拦截并占位 cf-probe / Cloudflare 测速与探测程序，停用常驻服务
+        # 4. 拦截并占位 CloudflareSpeedTest 测速程序（并自动恢复误占位的 cf-probe 探针文件）
         incus exec "$ct" -- sh -c '
-            for f in /usr/local/bin/cf-probe /usr/bin/cf-probe /usr/local/bin/CloudflareSpeedTest /usr/bin/CloudflareSpeedTest; do
+            for f in /usr/local/bin/cf-probe /usr/bin/cf-probe; do
+                if [ -f "$f" ] && grep -q "严禁运行 cf-probe" "$f" 2>/dev/null; then
+                    rm -f "$f" 2>/dev/null || true
+                fi
+            done
+            for f in /usr/local/bin/CloudflareSpeedTest /usr/bin/CloudflareSpeedTest; do
                 if [ -f "$f" ] || [ ! -e "$f" ]; then
                     echo "#!/bin/sh" > "$f" 2>/dev/null
-                    echo "echo \"\033[1;31m[错误] 本节点严禁运行 cf-probe / Cloudflare 测速探针服务！\033[0m\"" >> "$f" 2>/dev/null
+                    echo "echo \"\033[1;31m[错误] 本节点严禁运行 CloudflareSpeedTest 测速服务！\033[0m\"" >> "$f" 2>/dev/null
                     echo "exit 1" >> "$f" 2>/dev/null
                     chmod 755 "$f" 2>/dev/null || true
                 fi
             done
-            if [ -f /etc/init.d/cf-probe ]; then
-                rc-service cf-probe stop 2>/dev/null || true
-                rc-update del cf-probe default 2>/dev/null || true
-            fi
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl stop cf-probe 2>/dev/null || true
-                systemctl disable cf-probe 2>/dev/null || true
-            fi
         ' 2>/dev/null || true
         count=$((count+1))
     done
     if [ "$count" -gt 0 ]; then
-        log "已为当前运行的 $count 个容器布署防 DD / 防 MTProto / 防代理面板 / 防 cf-probe 物理工作区锁"
+        log "已为当前运行的 $count 个容器布署防 DD / 防 MTProto / 防代理面板 / 防测速物理工作区锁"
     fi
 }
 
@@ -365,7 +372,6 @@ apply_rules() {
             "speedtest.cn"
             "fast.com"
             "speed.cloudflare.com"
-            "cf-probe"
             "CloudflareSpeedTest"
             "ookla"
             "test.ustc.edu.cn"

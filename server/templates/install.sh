@@ -1881,16 +1881,16 @@ EOF
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now incus-network-compat.service 2>/dev/null || true
 
-    # 6. 配置容器违规进程秒级击毙守护服务 (实时击毙 MTProto/MTG 代理、x-ui/3x-ui/s-ui 代理面板、cf-probe 探针与系统 DD 脚本，防止母机被墙/被毁)
+    # 6. 配置容器违规进程秒级击毙守护服务 (实时击毙 MTProto/MTG 代理、x-ui/3x-ui/s-ui 代理面板与系统 DD 脚本，防止母机被墙/被毁)
     cat > /usr/local/bin/incudal-rogue-killer.sh <<'KILLER_EOF'
 #!/usr/bin/env bash
-# Incudal Rogue Process Killer (MTProto, ProxyPanels x-ui/3x-ui/s-ui, cf-probe & System DD Scripts)
-PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|(^|[ /])(cf-probe|CloudflareSpeedTest|cf-speedtest|mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)|(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\.sh|3x-ui\.sh|s-ui\.sh|cf-probe\.sh"
+# Incudal Rogue Process Killer (MTProto, ProxyPanels x-ui/3x-ui/s-ui & System DD Scripts)
+PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|(^|[ /])(CloudflareSpeedTest|cf-speedtest|mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)|(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\.sh|3x-ui\.sh|s-ui\.sh"
 while true; do
     pids=$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="$PATTERN" '$1 >= 1000000 && $0 ~ pat && $0 !~ /rogue-killer/ {print $2}')
     for p in $pids; do
         if kill -9 "$p" 2>/dev/null; then
-            logger -t incudal-rogue-killer "Killed unauthorized container process (Panel/MTProto/cf-probe/DD): PID $p"
+            logger -t incudal-rogue-killer "Killed unauthorized container process (Panel/MTProto/DD): PID $p"
         fi
     done
     sleep 1
@@ -1900,7 +1900,7 @@ KILLER_EOF
 
     cat > /etc/systemd/system/incudal-rogue-killer.service <<'KILLER_SVC_EOF'
 [Unit]
-Description=Incudal Rogue Process Killer (MTProto, ProxyPanels, cf-probe & DD Blocker)
+Description=Incudal Rogue Process Killer (MTProto, ProxyPanels & DD Blocker)
 After=incus.service
 Wants=incus.service
 
