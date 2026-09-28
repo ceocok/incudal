@@ -24,6 +24,11 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# 若通过管道执行 (如 curl ... | bash)，重定向标准输入至终端以支持交互输入
+if [ ! -t 0 ] && [ -e /dev/tty ]; then
+    exec < /dev/tty 2>/dev/null || true
+fi
+
 CONFIG_FILE="/etc/network/interfaces"
 RESOLV_FILE="/etc/resolv.conf"
 LOCK_FILE="/tmp/net_change_watchdog.lock"
@@ -155,12 +160,13 @@ collect_input() {
 
     # 网卡名称
     read -rp "$(echo -e "  1. 物理网卡名称 [默认: ${GREEN}${DETECTED_IFACE}${RESET}]: ")" INPUT_IFACE
+    INPUT_IFACE="${INPUT_IFACE//[$'\r\n\t ']/}"
     TARGET_IFACE="${INPUT_IFACE:-$DETECTED_IFACE}"
 
     # 新 IPv4 地址
     while true; do
         read -rp "$(echo -e "  2. 新 IPv4 地址 (例: 10.92.34.10): ")" INPUT_IPV4
-        INPUT_IPV4="${INPUT_IPV4// /}"
+        INPUT_IPV4="${INPUT_IPV4//[$'\r\n\t ']/}"
         # 兼容用户带 /24 输入的情况
         if [[ "$INPUT_IPV4" =~ ^([0-9.]+)/([0-9]+)$ ]]; then
             TARGET_IP="${BASH_REMATCH[1]}"
@@ -179,7 +185,7 @@ collect_input() {
     local def_cidr="24"
     [[ -n "$TARGET_CIDR" ]] && def_cidr="$TARGET_CIDR"
     read -rp "$(echo -e "  3. 子网掩码或前缀 [默认: ${GREEN}255.255.255.0 /24${RESET}]: ")" INPUT_MASK
-    INPUT_MASK="${INPUT_MASK// /}"
+    INPUT_MASK="${INPUT_MASK//[$'\r\n\t ']/}"
     if [[ -z "$INPUT_MASK" ]]; then
         TARGET_CIDR="24"
     else
@@ -194,7 +200,7 @@ collect_input() {
     fi
     while true; do
         read -rp "$(echo -e "  4. 新 IPv4 网关 [默认: ${GREEN}${def_gw}${RESET}]: ")" INPUT_GW
-        INPUT_GW="${INPUT_GW// /}"
+        INPUT_GW="${INPUT_GW//[$'\r\n\t ']/}"
         TARGET_GW="${INPUT_GW:-$def_gw}"
         if is_valid_ipv4 "$TARGET_GW"; then
             break
@@ -215,7 +221,7 @@ collect_input() {
 
     while true; do
         read -rp "$(echo -e "  5. 新 IPv6 地址 [默认: ${GREEN}${def_v6:-无}${RESET}]: ")" INPUT_IPV6
-        INPUT_IPV6="${INPUT_IPV6// /}"
+        INPUT_IPV6="${INPUT_IPV6//[$'\r\n\t ']/}"
         TARGET_IPV6="${INPUT_IPV6:-$def_v6}"
         
         # 允许留空跳过 IPv6
@@ -251,7 +257,7 @@ collect_input() {
 
         while true; do
             read -rp "$(echo -e "  6. 新 IPv6 网关 [默认: ${GREEN}${def_v6_gw}${RESET}]: ")" INPUT_V6_GW
-            INPUT_V6_GW="${INPUT_V6_GW// /}"
+            INPUT_V6_GW="${INPUT_V6_GW//[$'\r\n\t ']/}"
             TARGET_IPV6_GW="${INPUT_V6_GW:-$def_v6_gw}"
             if is_valid_ipv6 "$TARGET_IPV6_GW"; then
                 break
@@ -264,10 +270,11 @@ collect_input() {
     echo -e "\n  7. DNS 服务器配置:"
     echo -e "     默认将集成双栈高可用解析: ${DIM}1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, 2001:4860:4860::8888${RESET}"
     read -rp "$(echo -e "     使用默认 DNS 方案？[Y/n]: ")" CONFIRM_DNS
+    CONFIRM_DNS="${CONFIRM_DNS//[$'\r\n\t ']/}"
     if [[ "$CONFIRM_DNS" =~ ^[nN]$ ]]; then
         read -rp "     请输入自定义 DNS1: " CUSTOM_DNS1
         read -rp "     请输入自定义 DNS2: " CUSTOM_DNS2
-        DNS_SERVERS=("$CUSTOM_DNS1" "$CUSTOM_DNS2")
+        DNS_SERVERS=("${CUSTOM_DNS1//[$'\r\n\t ']/}" "${CUSTOM_DNS2//[$'\r\n\t ']/}")
     else
         DNS_SERVERS=("1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888")
     fi
@@ -352,6 +359,7 @@ __CONF_V6_EOF__
     echo ""
 
     read -rp "$(echo -e "${BOLD}👉 确认立刻应用新网络配置？(yes/no) [默认: yes]: ${RESET}")" CONFIRM_APPLY
+    CONFIRM_APPLY="${CONFIRM_APPLY//[$'\r\n\t ']/}"
     CONFIRM_APPLY="${CONFIRM_APPLY:-yes}"
     if [[ "$CONFIRM_APPLY" != "yes" && "$CONFIRM_APPLY" != "y" && "$CONFIRM_APPLY" != "Y" ]]; then
         echo -e "\n${YELLOW}已取消应用操作，系统网络保持原样未变动。${RESET}"
@@ -463,11 +471,12 @@ apply_with_safety_watchdog() {
         echo -e "  可能原因: IDC 物理机房跳线未完成割接，或网关尚未分配。"
         echo ""
         echo -e "  ${YELLOW}请选择:${RESET}"
-        echo -e "    1) ${BOLD}回车确认正常${RESET} (解除自动回滚，保留新配置，例如确定网关禁 ping 但实际已通)"
-        echo -e "    2) ${BOLD}等待超时${RESET} (后台将在 60 秒内自动恢复旧 IP，避免失联)"
-        echo -e "    3) ${BOLD}输入 r 立刻回滚${RESET} (立即恢复旧配置)"
+        echo -e "    1) ${BOLD}输入 c 确认正常${RESET} (解除看门狗，强制保留新配置，例如确定网关禁 ping 但实际已通)"
+        echo -e "    2) ${BOLD}输入 r 立刻回滚${RESET} (立即恢复旧配置)"
+        echo -e "    3) ${BOLD}默认回车或等待超时${RESET} (保持后台看门狗，若60秒内仍未测通将自动回滚)"
         echo ""
-        read -t 40 -rp "👉 请在 40 秒内输入选择 (输入 r 立即回滚 / 输入 c 强制保留新配置): " POST_CHOICE || true
+        read -t 40 -rp "👉 请在 40 秒内输入选择 [默认等待自动保护]: " POST_CHOICE || true
+        POST_CHOICE="${POST_CHOICE//[$'\r\n\t ']/}"
 
         if [[ "$POST_CHOICE" == "r" || "$POST_CHOICE" == "R" ]]; then
             echo -e "\n${YELLOW}正在手动执行紧急回滚...${RESET}"
@@ -479,7 +488,7 @@ apply_with_safety_watchdog() {
             rm -f "$LOCK_FILE"
             echo -e "\n${GREEN}已解除看门狗，新配置将强制保留生效。${RESET}"
         else
-            echo -e "\n${YELLOW}未输入任何指令，看门狗将在检测不到网络时自动为您回滚旧配置...${RESET}"
+            echo -e "\n${YELLOW}未选择强制保留，看门狗将在检测不到网络时自动为您回滚旧配置...${RESET}"
         fi
     fi
 }
@@ -492,6 +501,4 @@ main() {
     apply_with_safety_watchdog
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi
+main "$@"
