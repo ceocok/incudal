@@ -846,7 +846,7 @@ show_menu() {
 
 # 主入口解析
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    echo "用法: $0 [start|stop|status|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only]"
+    echo "用法: $0 [start|stop|status|allow-speed|block-speed|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only]"
     exit 0
 fi
 
@@ -876,6 +876,18 @@ case "${1:-}" in
     uninstall)
         uninstall
         ;;
+    allow-speed|allow-speedtest|unblock-speed|unblock-speedtest|speedtest-off|--allow-speedtest)
+        echo ""
+        apply_rules "false" "true" "true" "true" "true" "true" "true"
+        echo ""
+        log "已开放测速 (Speedtest 拦截已解除，挖矿/BT/DD/MTProto/代理面板防护依然有效) ✓"
+        ;;
+    block-speed|block-speedtest|deny-speed|deny-speedtest|speedtest-on|--block-speedtest)
+        echo ""
+        apply_rules "true" "true" "true" "true" "true" "true" "true"
+        echo ""
+        log "已恢复测速拦截 (Speedtest/iPerf 测速已重新屏蔽，全量防护已生效) ✓"
+        ;;
     --all)
         apply_rules "true" "true" "true" "true" "true" "true" "true"
         ;;
@@ -901,7 +913,7 @@ case "${1:-}" in
         apply_rules "false" "false" "false" "false" "false" "false" "true"
         ;;
     --help|-h)
-        echo "用法: $0 [start|stop|status|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only]"
+        echo "用法: $0 [start|stop|status|allow-speed|block-speed|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only]"
         exit 0
         ;;
     *)
