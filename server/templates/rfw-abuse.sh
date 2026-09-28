@@ -8,7 +8,7 @@
 
 set -e
 
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.4.0"
 INSTALL_PATH="/usr/local/bin/rfw-abuse"
 SERVICE_PATH="/etc/systemd/system/rfw-abuse.service"
 
@@ -208,67 +208,55 @@ apply_container_traps() {
     local count=0
     for ct in $containers; do
         [[ -z "$ct" ]] && continue
-        # 1. 锁死 /x，破坏 DD 脚本工作区
-        if [[ "$enable_dd" == "true" ]]; then
-            incus exec "$ct" -- sh -c 'touch /x 2>/dev/null && chmod 000 /x 2>/dev/null && chattr +i /x 2>/dev/null || true' 2>/dev/null || true
-            incus exec "$ct" -- sh -c '
+        incus exec "$ct" -- sh -c "
+            if [ '$enable_dd' = 'true' ]; then
+                touch /x 2>/dev/null && chmod 000 /x 2>/dev/null && chattr +i /x 2>/dev/null || true
                 for f in /root/OsMutation.sh /root/reinstall.sh /root/InstallNET.sh /root/NewReinstall.sh /usr/local/bin/OsMutation.sh; do
-                    if [ ! -f "$f" ]; then
-                        echo "#!/bin/sh" > "$f" 2>/dev/null
-                        echo "echo \"\033[1;31m[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！\033[0m\"" >> "$f" 2>/dev/null
-                        echo "exit 1" >> "$f" 2>/dev/null
-                        chmod 755 "$f" 2>/dev/null || true
+                    if [ ! -f \"\$f\" ]; then
+                        echo '#!/bin/sh' > \"\$f\" 2>/dev/null
+                        echo 'echo \"[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！\"' >> \"\$f\" 2>/dev/null
+                        echo 'exit 1' >> \"\$f\" 2>/dev/null
+                        chmod 755 \"\$f\" 2>/dev/null || true
                     fi
                 done
-            ' 2>/dev/null || true
-        fi
-        # 2. 拦截并占位 MTProto 代理二进制文件
-        if [[ "$enable_mt" == "true" ]]; then
-            incus exec "$ct" -- sh -c '
+            fi
+            if [ '$enable_mt' = 'true' ]; then
                 for f in /usr/local/bin/mtg /usr/bin/mtg /usr/local/bin/mtproto-proxy /usr/bin/mtproto-proxy; do
-                    if [ ! -f "$f" ]; then
-                        echo "#!/bin/sh" > "$f" 2>/dev/null
-                        echo "echo \"\033[1;31m[错误] 本节点严禁运行 Telegram MTProto 代理服务！\033[0m\"" >> "$f" 2>/dev/null
-                        echo "exit 1" >> "$f" 2>/dev/null
-                        chmod 755 "$f" 2>/dev/null || true
+                    if [ ! -f \"\$f\" ]; then
+                        echo '#!/bin/sh' > \"\$f\" 2>/dev/null
+                        echo 'echo \"[错误] 本节点严禁运行 Telegram MTProto 代理服务！\"' >> \"\$f\" 2>/dev/null
+                        echo 'exit 1' >> \"\$f\" 2>/dev/null
+                        chmod 755 \"\$f\" 2>/dev/null || true
                     fi
                 done
-            ' 2>/dev/null || true
-        fi
-        # 3. 拦截并占位 x-ui / 3x-ui / s-ui / v2-ui 面板主程序与命令
-        if [[ "$enable_panel" == "true" ]]; then
-            incus exec "$ct" -- sh -c '
+            fi
+            if [ '$enable_panel' = 'true' ]; then
                 for d in /usr/local/x-ui /usr/local/3x-ui /usr/local/s-ui /usr/local/v2-ui; do
-                    if [ ! -d "$d" ]; then
-                        mkdir -p "$d" 2>/dev/null || true
-                    fi
+                    [ ! -d \"\$d\" ] && mkdir -p \"\$d\" 2>/dev/null || true
                 done
                 for f in /usr/local/x-ui/x-ui /usr/local/3x-ui/3x-ui /usr/local/s-ui/s-ui /usr/local/v2-ui/v2-ui /usr/bin/x-ui /usr/bin/3x-ui /usr/bin/s-ui /usr/bin/v2-ui; do
-                    if [ ! -f "$f" ]; then
-                        echo "#!/bin/sh" > "$f" 2>/dev/null
-                        echo "echo \"\033[1;31m[错误] 本节点严禁运行 x-ui / 3x-ui / s-ui 等代理面板服务！\033[0m\"" >> "$f" 2>/dev/null
-                        echo "exit 1" >> "$f" 2>/dev/null
-                        chmod 755 "$f" 2>/dev/null || true
+                    if [ ! -f \"\$f\" ]; then
+                        echo '#!/bin/sh' > \"\$f\" 2>/dev/null
+                        echo 'echo \"[错误] 本节点严禁运行 x-ui / 3x-ui / s-ui 等代理面板服务！\"' >> \"\$f\" 2>/dev/null
+                        echo 'exit 1' >> \"\$f\" 2>/dev/null
+                        chmod 755 \"\$f\" 2>/dev/null || true
                     fi
                 done
-            ' 2>/dev/null || true
-        fi
-        # 4. 拦截并占位 CloudflareSpeedTest 测速程序（并自动恢复误占位的 cf-probe 探针文件）
-        incus exec "$ct" -- sh -c '
+            fi
             for f in /usr/local/bin/cf-probe /usr/bin/cf-probe; do
-                if [ -f "$f" ] && grep -q "严禁运行 cf-probe" "$f" 2>/dev/null; then
-                    rm -f "$f" 2>/dev/null || true
+                if [ -f \"\$f\" ] && grep -q '严禁运行 cf-probe' \"\$f\" 2>/dev/null; then
+                    rm -f \"\$f\" 2>/dev/null || true
                 fi
             done
             for f in /usr/local/bin/CloudflareSpeedTest /usr/bin/CloudflareSpeedTest; do
-                if [ -f "$f" ] || [ ! -e "$f" ]; then
-                    echo "#!/bin/sh" > "$f" 2>/dev/null
-                    echo "echo \"\033[1;31m[错误] 本节点严禁运行 CloudflareSpeedTest 测速服务！\033[0m\"" >> "$f" 2>/dev/null
-                    echo "exit 1" >> "$f" 2>/dev/null
-                    chmod 755 "$f" 2>/dev/null || true
+                if [ -f \"\$f\" ] || [ ! -e \"\$f\" ]; then
+                    echo '#!/bin/sh' > \"\$f\" 2>/dev/null
+                    echo 'echo \"[错误] 本节点严禁运行 CloudflareSpeedTest 测速服务！\"' >> \"\$f\" 2>/dev/null
+                    echo 'exit 1' >> \"\$f\" 2>/dev/null
+                    chmod 755 \"\$f\" 2>/dev/null || true
                 fi
             done
-        ' 2>/dev/null || true
+        " 2>/dev/null || true
         count=$((count+1))
     done
     if [ "$count" -gt 0 ]; then
@@ -287,6 +275,12 @@ clean_rules() {
         iptables -D INPUT -j "$CHAIN_V4" 2>/dev/null || true
         iptables -F "$CHAIN_V4" 2>/dev/null || true
         iptables -X "$CHAIN_V4" 2>/dev/null || true
+
+        # 清理可能散落在 FORWARD 的历史遗留重复规则
+        while iptables -D FORWARD -m string --string "t.me/proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-Link" -j DROP 2>/dev/null; do :; done
+        while iptables -D FORWARD -m string --string "tg://proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-DeepLink" -j DROP 2>/dev/null; do :; done
+        while iptables -D FORWARD -p tcp -m u32 --u32 "0>>22&0x3C@0=0xeeeeeeee" -m comment --comment "Block-MTProto-Intermediate" -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+        while iptables -D FORWARD -p tcp -m u32 --u32 "0>>22&0x3C@0=0xdddddddd" -m comment --comment "Block-MTProto-Padded" -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
     fi
 
     # IPv6 清理
@@ -296,6 +290,10 @@ clean_rules() {
         ip6tables -D INPUT -j "$CHAIN_V6" 2>/dev/null || true
         ip6tables -F "$CHAIN_V6" 2>/dev/null || true
         ip6tables -X "$CHAIN_V6" 2>/dev/null || true
+
+        # 清理可能散落在 FORWARD 的历史遗留重复规则
+        while ip6tables -D FORWARD -m string --string "t.me/proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-Link-v6" -j DROP 2>/dev/null; do :; done
+        while ip6tables -D FORWARD -m string --string "tg://proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-DeepLink-v6" -j DROP 2>/dev/null; do :; done
     fi
 
     clean_dd_dns_sinkhole
@@ -354,18 +352,66 @@ apply_rules() {
         ip6tables -A "$CHAIN_V6" -p udp -m multiport --dports 546,547 -j RETURN
     fi
 
-    # ========================== 3. 屏蔽测速 (Speedtest) ==========================
+    # ========================== 3. 滥用端口与协议握手底层拦截 (低开销快速阻断) ==========================
+    # 3.1 测速专用端口拦截 (iperf/iperf3)
     if [[ "$enable_speedtest" == "true" ]]; then
-        info "正在加载【测速拦截】规则 (Speedtest / iPerf / Fast)..."
-        # 3.1 测速专用端口拦截 (iperf/iperf3)
         iptables -A "$CHAIN_V4" -p tcp --dport 5201 -j REJECT --reject-with tcp-reset
         iptables -A "$CHAIN_V4" -p udp --dport 5201 -j DROP
         if has_ipv6; then
             ip6tables -A "$CHAIN_V6" -p tcp --dport 5201 -j REJECT --reject-with tcp-reset
             ip6tables -A "$CHAIN_V6" -p udp --dport 5201 -j DROP
         fi
+    fi
 
-        # 3.2 常见测速服务特征关键词 (HTTP/TLS SNI / URL 载荷匹配)
+    # 3.2 典型矿池公认端口拦截
+    if [[ "$enable_mining" == "true" ]]; then
+        local mining_ports="3333,4444,5555,6666,7777,8888,9999,14433,14444"
+        iptables -A "$CHAIN_V4" -p tcp -m multiport --dports "$mining_ports" -j REJECT --reject-with tcp-reset
+        if has_ipv6; then
+            ip6tables -A "$CHAIN_V6" -p tcp -m multiport --dports "$mining_ports" -j REJECT --reject-with tcp-reset
+        fi
+    fi
+
+    # 3.3 常用 BT / PT / Tracker / DHT 端口拦截
+    if [[ "$enable_bt" == "true" ]]; then
+        iptables -A "$CHAIN_V4" -p tcp --dport 6881:6889 -j DROP
+        iptables -A "$CHAIN_V4" -p udp --dport 6881:6889 -j DROP
+        iptables -A "$CHAIN_V4" -p tcp --dport 6969 -j DROP
+        iptables -A "$CHAIN_V4" -p udp --dport 6969 -j DROP
+        iptables -A "$CHAIN_V4" -p tcp --dport 51413 -j DROP
+        iptables -A "$CHAIN_V4" -p udp --dport 51413 -j DROP
+        iptables -A "$CHAIN_V4" -p tcp -m multiport --dports 4662,4672 -j DROP
+        iptables -A "$CHAIN_V4" -p udp -m multiport --dports 4662,4672 -j DROP
+        if has_ipv6; then
+            ip6tables -A "$CHAIN_V6" -p tcp --dport 6881:6889 -j DROP
+            ip6tables -A "$CHAIN_V6" -p udp --dport 6881:6889 -j DROP
+            ip6tables -A "$CHAIN_V6" -p tcp --dport 6969 -j DROP
+            ip6tables -A "$CHAIN_V6" -p udp --dport 6969 -j DROP
+            ip6tables -A "$CHAIN_V6" -p tcp --dport 51413 -j DROP
+            ip6tables -A "$CHAIN_V6" -p udp --dport 51413 -j DROP
+            ip6tables -A "$CHAIN_V6" -p tcp -m multiport --dports 4662,4672 -j DROP
+            ip6tables -A "$CHAIN_V6" -p udp -m multiport --dports 4662,4672 -j DROP
+        fi
+    fi
+
+    # 3.4 传统 MTProto TCP 握手特征拦截 (Intermediate: 0xeeeeeeee, Padded: 0xdddddddd)
+    if [[ "$enable_mtproto" == "true" ]]; then
+        iptables -A "$CHAIN_V4" -p tcp -m u32 --u32 "0>>22&0x3C@0=0xeeeeeeee" -m comment --comment "Block-MTProto-Intermediate" -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        iptables -A "$CHAIN_V4" -p tcp -m u32 --u32 "0>>22&0x3C@0=0xdddddddd" -m comment --comment "Block-MTProto-Padded" -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    fi
+
+    # ========================== 4. 高性能连接旁路加速 (根治软中断压垮 CPU 与限速) ==========================
+    # 任何连接在经历前 20 个报文后，协议握手与初始请求特征（TLS SNI/HTTP头/协议指纹）检测已完毕；
+    # 报文数 >= 21 即进入批量数据传输阶段（TLS加密乱码或大文件流），直接放行返回系统主链，
+    # 彻底避免后续 90+ 条深度正则对海量高并发数据包进行无谓的软中断地毯式扫描，使网速能跑满硬件物理带宽。
+    iptables -A "$CHAIN_V4" -m connbytes --connbytes 21: --connbytes-mode packets --connbytes-dir both -j RETURN 2>/dev/null || true
+    if has_ipv6; then
+        ip6tables -A "$CHAIN_V6" -m connbytes --connbytes 21: --connbytes-mode packets --connbytes-dir both -j RETURN 2>/dev/null || true
+    fi
+
+    # ========================== 5. 屏蔽测速特征关键词 (Speedtest / Fast) ==========================
+    if [[ "$enable_speedtest" == "true" ]]; then
+        info "正在加载【测速拦截】规则 (Speedtest / iPerf / Fast)..."
         local speedtest_keywords=(
             "speedtest"
             "speedtest.net"
@@ -389,17 +435,10 @@ apply_rules() {
         log "测速拦截规则已生效"
     fi
 
-    # ========================== 4. 屏蔽挖矿 (Mining) ==========================
+    # ========================== 6. 屏蔽挖矿 (Mining) ==========================
     if [[ "$enable_mining" == "true" ]]; then
         info "正在加载【挖矿拦截】规则 (Stratum / XMRig / 常用矿池)..."
-        # 4.1 典型矿池公认端口拦截
-        local mining_ports="3333,4444,5555,6666,7777,8888,9999,14433,14444"
-        iptables -A "$CHAIN_V4" -p tcp -m multiport --dports "$mining_ports" -j REJECT --reject-with tcp-reset
-        if has_ipv6; then
-            ip6tables -A "$CHAIN_V6" -p tcp -m multiport --dports "$mining_ports" -j REJECT --reject-with tcp-reset
-        fi
-
-        # 4.2 Stratum 协议握手与 JSON-RPC 关键词特征
+        # Stratum 协议握手与 JSON-RPC 关键词特征
         local mining_stratum_keywords=(
             "stratum+tcp"
             "stratum+udp"
@@ -417,7 +456,7 @@ apply_rules() {
             fi
         done
 
-        # 4.3 知名矿池域名特征
+        # 知名矿池域名特征
         local mining_pool_keywords=(
             "ethermine.org"
             "f2pool.com"
@@ -440,30 +479,10 @@ apply_rules() {
         log "挖矿拦截规则已生效"
     fi
 
-    # ========================== 5. 屏蔽 BT / P2P 下载 (BitTorrent) ==========================
+    # ========================== 7. 屏蔽 BT / P2P 下载 (BitTorrent) ==========================
     if [[ "$enable_bt" == "true" ]]; then
         info "正在加载【BT/P2P拦截】规则 (BitTorrent / DHT / 迅雷)..."
-        # 5.1 常用 BT / PT / Tracker / DHT 端口拦截
-        iptables -A "$CHAIN_V4" -p tcp --dport 6881:6889 -j DROP
-        iptables -A "$CHAIN_V4" -p udp --dport 6881:6889 -j DROP
-        iptables -A "$CHAIN_V4" -p tcp --dport 6969 -j DROP
-        iptables -A "$CHAIN_V4" -p udp --dport 6969 -j DROP
-        iptables -A "$CHAIN_V4" -p tcp --dport 51413 -j DROP
-        iptables -A "$CHAIN_V4" -p udp --dport 51413 -j DROP
-        iptables -A "$CHAIN_V4" -p tcp -m multiport --dports 4662,4672 -j DROP
-        iptables -A "$CHAIN_V4" -p udp -m multiport --dports 4662,4672 -j DROP
-        if has_ipv6; then
-            ip6tables -A "$CHAIN_V6" -p tcp --dport 6881:6889 -j DROP
-            ip6tables -A "$CHAIN_V6" -p udp --dport 6881:6889 -j DROP
-            ip6tables -A "$CHAIN_V6" -p tcp --dport 6969 -j DROP
-            ip6tables -A "$CHAIN_V6" -p udp --dport 6969 -j DROP
-            ip6tables -A "$CHAIN_V6" -p tcp --dport 51413 -j DROP
-            ip6tables -A "$CHAIN_V6" -p udp --dport 51413 -j DROP
-            ip6tables -A "$CHAIN_V6" -p tcp -m multiport --dports 4662,4672 -j DROP
-            ip6tables -A "$CHAIN_V6" -p udp -m multiport --dports 4662,4672 -j DROP
-        fi
-
-        # 5.2 BitTorrent 握手协议、Tracker 与 DHT 报文特征
+        # BitTorrent 握手协议、Tracker 与 DHT 报文特征
         local bt_keywords=(
             "BitTorrent"
             "BitTorrent protocol"
@@ -489,7 +508,7 @@ apply_rules() {
         log "BT/P2P 拦截规则已生效"
     fi
 
-    # ========================== 6. 屏蔽性能跑分与压测 (Benchmark) ==========================
+    # ========================== 8. 屏蔽性能跑分与压测 (Benchmark) ==========================
     if [[ "$enable_bench" == "true" ]]; then
         info "正在加载【性能跑分/压测拦截】规则 (Geekbench / YABS / SuperBench / UnixBench)..."
         local bench_keywords=(
@@ -521,7 +540,7 @@ apply_rules() {
         log "性能跑分/压测拦截规则已生效"
     fi
 
-    # ========================== 7. 屏蔽系统重装与 DD 脚本 (Anti-DD) ==========================
+    # ========================== 9. 屏蔽系统重装与 DD 脚本 (Anti-DD) ==========================
     if [[ "$enable_antidd" == "true" ]]; then
         info "正在加载【DD重装脚本拦截】规则 (reinstall.sh / InstallNET / OsMutation / MoeClub)..."
         local dd_keywords=(
@@ -569,14 +588,9 @@ apply_rules() {
         clean_dd_dns_sinkhole
     fi
 
-    # ========================== 8. 屏蔽 Telegram MTProto 代理 (Anti-MTProto) ==========================
+    # ========================== 10. 屏蔽 Telegram MTProto 代理 (Anti-MTProto) ==========================
     if [[ "$enable_mtproto" == "true" ]]; then
         info "正在加载【Telegram MTProto 代理拦截】规则 (MTG / mtproto-proxy / 协议握手)..."
-        # 8.1 传统 MTProto TCP 握手特征拦截 (Intermediate: 0xeeeeeeee, Padded: 0xdddddddd)
-        iptables -A "$CHAIN_V4" -p tcp -m u32 --u32 "0>>22&0x3C@0=0xeeeeeeee" -m comment --comment "Block-MTProto-Intermediate" -j REJECT --reject-with tcp-reset 2>/dev/null || true
-        iptables -A "$CHAIN_V4" -p tcp -m u32 --u32 "0>>22&0x3C@0=0xdddddddd" -m comment --comment "Block-MTProto-Padded" -j REJECT --reject-with tcp-reset 2>/dev/null || true
-
-        # 8.2 MTG / MTProto 推广与分享链接、安装脚本与仓库特征匹配
         local mtproto_keywords=(
             "t.me/proxy?"
             "tg://proxy?"
@@ -594,7 +608,7 @@ apply_rules() {
         log "Telegram MTProto 代理拦截规则已生效"
     fi
 
-    # ========================== 9. 屏蔽代理面板安装与分发 (Anti-ProxyPanel) ==========================
+    # ========================== 11. 屏蔽代理面板安装与分发 (Anti-ProxyPanel) ==========================
     if [[ "$enable_proxypanel" == "true" ]]; then
         info "正在加载【代理面板拦截】规则 (x-ui / 3x-ui / s-ui / v2-ui)..."
         local panel_keywords=(
@@ -618,9 +632,9 @@ apply_rules() {
         log "代理面板 (x-ui/3x-ui/s-ui) 拦截规则已生效"
     fi
 
-    # ========================== 10. 激活秒级违规进程查杀守护与容器工作区锁 ==========================
+    # ========================== 12. 激活秒级违规进程查杀守护与容器工作区锁 ==========================
     apply_antidd_daemon "$enable_antidd" "$enable_mtproto" "$enable_proxypanel"
-    apply_container_traps "$enable_antidd" "$enable_mtproto" "$enable_proxypanel"
+    apply_container_traps "$enable_antidd" "$enable_mtproto" "$enable_proxypanel" &
 
     # ========================== 11. 链尾部安全放行 ==========================
     # 任何未被违规特征命中的正常流量，安全返回系统常规转发链
@@ -700,16 +714,16 @@ show_status() {
 
     echo -e "  ${GREEN}● 规则链运行正常${NC} (开机守护: $(systemctl is-active rfw-abuse.service 2>/dev/null || echo "未激活"))"
     echo ""
-    echo -e "  ${BOLD}IPv4 拦截规则明细 (前 15 项活跃计数)：${NC}"
+    echo -e "  ${BOLD}IPv4 拦截规则明细 (前 30 项活跃计数)：${NC}"
     echo -e "  ${DIM}──────────────────────────────────────────────────────────${NC}"
-    iptables -L "$CHAIN_V4" -v -n --line-numbers | head -n 25
+    iptables -L "$CHAIN_V4" -v -n --line-numbers | head -n 35
     echo -e "  ${DIM}──────────────────────────────────────────────────────────${NC}"
 
     if has_ipv6 && ip6tables -L "$CHAIN_V6" -n >/dev/null 2>&1; then
         echo ""
-        echo -e "  ${BOLD}IPv6 拦截规则明细 (前 10 项活跃计数)：${NC}"
+        echo -e "  ${BOLD}IPv6 拦截规则明细 (前 25 项活跃计数)：${NC}"
         echo -e "  ${DIM}──────────────────────────────────────────────────────────${NC}"
-        ip6tables -L "$CHAIN_V6" -v -n --line-numbers | head -n 15
+        ip6tables -L "$CHAIN_V6" -v -n --line-numbers | head -n 30
         echo -e "  ${DIM}──────────────────────────────────────────────────────────${NC}"
     fi
     echo ""

@@ -1194,31 +1194,43 @@ net.ipv4.conf.default.rp_filter = 0
 # ======== 连接跟踪优化（防止高并发连接打满 conntrack 导致丢包） ========
 net.netfilter.nf_conntrack_max = 1048576
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
-net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
-net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
-net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 15
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 15
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 15
 
-# ======== BBR 拥塞控制 ========
+# ======== BBR 拥塞控制与排队规则 ========
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
-# ======== TCP 性能优化 ========
+# ======== TCP 性能与连接复用优化 ========
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_ecn = 0
 net.ipv4.tcp_frto = 0
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_rfc1337 = 0
 net.ipv4.tcp_sack = 1
-net.ipv4.tcp_fack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.ip_local_port_range = 1024 65535
+net.core.somaxconn = 8192
+net.core.netdev_max_backlog = 16384
+net.ipv4.tcp_max_syn_backlog = 8192
 
-# ======== 网络缓冲区 ========
-net.core.rmem_max = 33554432
-net.core.wmem_max = 33554432
-net.ipv4.tcp_rmem = 4096 87380 33554432
-net.ipv4.tcp_wmem = 4096 16384 33554432
+# ======== 网络缓冲区（安全收敛防 OOM，适合 2G-4G 宿主机） ========
+net.core.rmem_max = 8388608
+net.core.wmem_max = 8388608
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.tcp_rmem = 4096 131072 8388608
+net.ipv4.tcp_wmem = 4096 65536 8388608
 net.ipv4.udp_rmem_min = 8192
 net.ipv4.udp_wmem_min = 8192
 
@@ -1882,40 +1894,43 @@ EOF
     systemctl enable --now incus-network-compat.service 2>/dev/null || true
 
     # 6. 配置容器违规进程秒级击毙守护服务 (实时击毙 MTProto/MTG 代理、x-ui/3x-ui/s-ui 代理面板与系统 DD 脚本，防止母机被墙/被毁)
-    cat > /usr/local/bin/incudal-rogue-killer.sh <<'KILLER_EOF'
+    systemctl stop incudal-rogue-killer.service 2>/dev/null || true
+    systemctl disable incudal-rogue-killer.service 2>/dev/null || true
+    rm -f /etc/systemd/system/incudal-rogue-killer.service /usr/local/bin/incudal-rogue-killer.sh 2>/dev/null || true
+
+    cat > /usr/local/bin/rfw-antidd-daemon <<'KILLER_EOF'
 #!/usr/bin/env bash
-# Incudal Rogue Process Killer (MTProto, ProxyPanels x-ui/3x-ui/s-ui & System DD Scripts)
-PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|(^|[ /])(CloudflareSpeedTest|cf-speedtest|mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)|(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\.sh|3x-ui\.sh|s-ui\.sh"
+# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto & ProxyPanels)
+PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|(^|[ /])(CloudflareSpeedTest|cf-speedtest|mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)|(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\.sh|3x-ui\.sh|s-ui\.sh|(^|[ /])(chrome|chromium|chromedriver|geckodriver|selenium|playwright|puppeteer)([[:space:]]|$)"
 while true; do
-    pids=$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="$PATTERN" '$1 >= 1000000 && $0 ~ pat && $0 !~ /rogue-killer/ {print $2}')
+    pids=$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="$PATTERN" '$1 >= 1000000 && $0 ~ pat && $0 !~ /rfw-antidd/ {print $2}')
     for p in $pids; do
         if kill -9 "$p" 2>/dev/null; then
-            logger -t incudal-rogue-killer "Killed unauthorized container process (Panel/MTProto/DD): PID $p"
+            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Bot/Browser): PID $p"
         fi
     done
-    sleep 1
+    sleep 60
 done
 KILLER_EOF
-    chmod +x /usr/local/bin/incudal-rogue-killer.sh
+    chmod +x /usr/local/bin/rfw-antidd-daemon
 
-    cat > /etc/systemd/system/incudal-rogue-killer.service <<'KILLER_SVC_EOF'
+    cat > /etc/systemd/system/rfw-antidd.service <<'KILLER_SVC_EOF'
 [Unit]
-Description=Incudal Rogue Process Killer (MTProto, ProxyPanels & DD Blocker)
+Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto & ProxyPanels)
 After=incus.service
-Wants=incus.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/incudal-rogue-killer.sh
+ExecStart=/usr/local/bin/rfw-antidd-daemon
 Restart=always
-RestartSec=3
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 KILLER_SVC_EOF
 
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now incudal-rogue-killer.service 2>/dev/null || true
+    systemctl enable --now rfw-antidd.service 2>/dev/null || true
 
     # 7. 立即执行一次规则注入
     /usr/local/bin/incus-network-compat.sh 2>/dev/null || true
@@ -1955,48 +1970,87 @@ KILLER_SVC_EOF
     auto_heal_broken_containers
 }
 
+# 配置容器网络与 SSH 常驻自愈守护定时器（每 2 分钟全自动巡检与修复）
+setup_auto_heal_daemon() {
+    cat > /usr/local/bin/incudal-auto-heal.sh <<'EOF'
+#!/usr/bin/env bash
+# Incudal Container Network & SSH Auto-Heal Guardian
+set -euo pipefail
+
+command -v incus >/dev/null 2>&1 || exit 0
+running_containers=$(incus list --format csv -c n,s 2>/dev/null | awk -F',' '$2=="RUNNING" {print $1}' || true)
+[[ -z "$running_containers" ]] && exit 0
+
+DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1 || true)
+host_mtu=""
+if [[ -n "$DEFAULT_IFACE" ]]; then
+    host_mtu=$(ip -o link show dev "$DEFAULT_IFACE" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}' || true)
+fi
+[[ -z "$host_mtu" ]] && host_mtu="1500"
+
+for c in $running_containers; do
+    # 1. 自动对齐容器内部 eth0 MTU 为宿主机物理 MTU
+    if [[ -n "$host_mtu" ]]; then
+        incus exec "$c" -- ip link set dev eth0 mtu "$host_mtu" >/dev/null 2>&1 || true
+    fi
+
+    # 2. 检查是否缺失 sshd
+    if ! incus exec "$c" -- which sshd >/dev/null 2>&1; then
+        logger -t incudal-auto-heal "Container [$c] missing sshd, starting auto-heal..."
+        if incus exec "$c" -- test -x /usr/local/bin/incus-setup.sh >/dev/null 2>&1; then
+            incus exec "$c" -- /usr/local/bin/incus-setup.sh >/dev/null 2>&1 || true
+        elif incus exec "$c" -- test -f /etc/alpine-release >/dev/null 2>&1; then
+            incus exec "$c" -- sh -c 'sed -i "s/https:/http:/g" /etc/apk/repositories 2>/dev/null; apk update && apk add --no-cache --allow-untrusted openssh openssh-server-pam bash shadow sed grep dhcpcd util-linux ca-certificates iproute2 && [ -x /usr/local/bin/incus-setup.sh ] && /usr/local/bin/incus-setup.sh || rc-service sshd restart' >/dev/null 2>&1 || true
+        elif incus exec "$c" -- test -f /etc/debian_version >/dev/null 2>&1; then
+            incus exec "$c" -- sh -c 'apt-get update && apt-get install -y openssh-server && systemctl restart ssh' >/dev/null 2>&1 || true
+        fi
+    else
+        # 确保已有 sshd 处于运行状态
+        if incus exec "$c" -- test -f /etc/init.d/sshd >/dev/null 2>&1; then
+            incus exec "$c" -- rc-service sshd status >/dev/null 2>&1 || incus exec "$c" -- rc-service sshd start >/dev/null 2>&1 || true
+        elif incus exec "$c" -- command -v systemctl >/dev/null 2>&1; then
+            incus exec "$c" -- systemctl is-active --quiet ssh >/dev/null 2>&1 || incus exec "$c" -- systemctl is-active --quiet sshd >/dev/null 2>&1 || incus exec "$c" -- systemctl start ssh >/dev/null 2>&1 || incus exec "$c" -- systemctl start sshd >/dev/null 2>&1 || true
+        fi
+    fi
+done
+EOF
+    chmod +x /usr/local/bin/incudal-auto-heal.sh
+
+    cat > /etc/systemd/system/incudal-auto-heal.service <<'EOF'
+[Unit]
+Description=Incudal Container Auto-Heal Service
+After=network.target incus.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/incudal-auto-heal.sh
+EOF
+
+    cat > /etc/systemd/system/incudal-auto-heal.timer <<'EOF'
+[Unit]
+Description=Incudal Container Auto-Heal Timer (every 2 minutes)
+After=network.target incus.service
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now incudal-auto-heal.timer 2>/dev/null || true
+}
+
 # 自动检测并修复因网络阻断导致 cloud-init 依赖安装失败或 MTU 异常的已有容器
 auto_heal_broken_containers() {
-    command -v incus >/dev/null 2>&1 || return 0
-    local running_containers=""
-    running_containers=$(incus list --format csv -c n,s 2>/dev/null | awk -F',' '$2=="RUNNING" {print $1}' || true)
-    [[ -z "$running_containers" ]] && return 0
-
-    local host_mtu=""
-    host_mtu=$(ip -o link show dev "$DEFAULT_IFACE" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}' || true)
-    [[ -z "$host_mtu" ]] && host_mtu="1500"
-
-    local healed=0
-    for c in $running_containers; do
-        # 1. 自动对齐容器内部 eth0 MTU 为宿主机物理 MTU
-        if [[ -n "$host_mtu" ]]; then
-            incus exec "$c" -- ip link set dev eth0 mtu "$host_mtu" >/dev/null 2>&1 || true
-        fi
-
-        # 2. 检查是否缺失 sshd
-        if ! incus exec "$c" -- which sshd >/dev/null 2>&1; then
-            if incus exec "$c" -- test -f /etc/alpine-release >/dev/null 2>&1; then
-                info "发现容器 [${c}] 缺失 SSH 服务，正在自动联网修复..."
-                incus exec "$c" -- sh -c 'apk update && apk add --no-cache openssh openssh-server-pam bash shadow sed grep dhcpcd util-linux ca-certificates iproute2 && /usr/local/bin/incus-setup.sh && rc-service sshd restart' >/dev/null 2>&1 || true
-                healed=$((healed+1))
-            elif incus exec "$c" -- test -f /etc/debian_version >/dev/null 2>&1; then
-                info "发现容器 [${c}] 缺失 SSH 服务，正在自动联网修复..."
-                incus exec "$c" -- sh -c 'apt-get update && apt-get install -y openssh-server && systemctl restart ssh' >/dev/null 2>&1 || true
-                healed=$((healed+1))
-            fi
-        else
-            # 确保已有 sshd 处于运行状态
-            if incus exec "$c" -- test -f /etc/init.d/sshd >/dev/null 2>&1; then
-                incus exec "$c" -- rc-service sshd status >/dev/null 2>&1 || incus exec "$c" -- rc-service sshd start >/dev/null 2>&1 || true
-            elif incus exec "$c" -- command -v systemctl >/dev/null 2>&1; then
-                incus exec "$c" -- systemctl is-active --quiet ssh >/dev/null 2>&1 || incus exec "$c" -- systemctl start ssh >/dev/null 2>&1 || true
-            fi
-        fi
-    done
-
-    if [[ "$healed" -gt 0 ]]; then
-        log "已自动修复 ${healed} 个之前因网络故障未能初始化 SSH 的容器"
+    setup_auto_heal_daemon
+    if [[ -x /usr/local/bin/incudal-auto-heal.sh ]]; then
+        /usr/local/bin/incudal-auto-heal.sh || true
     fi
+    log "容器网络与 SSH 常驻自愈定时任务 (incudal-auto-heal.timer，每 2 分钟巡检) 已激活就绪"
 }
 
 # ========================== 一键体检与母机修复 (无损模式) ==========================
