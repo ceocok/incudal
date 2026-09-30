@@ -415,10 +415,94 @@ install_singbox() {
             }
             ;;
         debian|redhat)
-            bash <(curl -fsSL https://sing-box.app/install.sh) || {
-                err "sing-box 安装失败"
+            # 方法1: 使用官方 apt/rpm 仓库 (不走 GitHub API，避免共享 IP 触发限流)
+            local repo_ok=false
+            if [ "$OS" = "debian" ]; then
+                info "尝试通过官方 apt 仓库安装 sing-box..."
+                mkdir -p /etc/apt/keyrings
+                if curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc 2>/dev/null; then
+                    chmod a+r /etc/apt/keyrings/sagernet.asc
+                    cat > /etc/apt/sources.list.d/sagernet.list <<'APTSRC'
+deb [signed-by=/etc/apt/keyrings/sagernet.asc] https://deb.sagernet.org/ * *
+APTSRC
+                    if apt-get update -y 2>/dev/null && apt-get install -y sing-box 2>/dev/null; then
+                        repo_ok=true
+                        info "通过官方 apt 仓库安装成功"
+                    else
+                        warn "apt 仓库安装失败，尝试备用方法..."
+                        rm -f /etc/apt/sources.list.d/sagernet.list
+                    fi
+                else
+                    warn "获取 GPG 密钥失败，尝试备用方法..."
+                fi
+            fi
+
+            # 方法2: 官方一键脚本 (会调用 GitHub API)
+            if ! $repo_ok; then
+                info "尝试通过官方一键脚本安装 sing-box..."
+                if bash <(curl -fsSL https://sing-box.app/install.sh) 2>/dev/null; then
+                    repo_ok=true
+                    info "通过官方一键脚本安装成功"
+                else
+                    warn "官方脚本安装失败 (可能是 GitHub API 限流)，尝试直接下载二进制..."
+                fi
+            fi
+
+            # 方法3: 直接下载二进制文件 (完全绕过 GitHub API)
+            if ! $repo_ok; then
+                info "尝试直接下载 sing-box 二进制文件..."
+                local ARCH
+                case "$(uname -m)" in
+                    x86_64|amd64) ARCH="amd64" ;;
+                    aarch64|arm64) ARCH="arm64" ;;
+                    armv7l) ARCH="armv7" ;;
+                    *) err "不支持的架构: $(uname -m)"; exit 1 ;;
+                esac
+                # 尝试通过 SourceForge 镜像获取最新版本或使用固定稳定版
+                local SB_VERSION=""
+                # 先尝试从 GitHub API 获取版本 (可能被限流)
+                SB_VERSION=$(curl -sfL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
+                    | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/' || true)
+                # 如果 API 失败，从网页抓取版本号
+                if [ -z "$SB_VERSION" ]; then
+                    SB_VERSION=$(curl -sfL "https://github.com/SagerNet/sing-box/releases/latest" 2>/dev/null \
+                        -o /dev/null -w '%{redirect_url}' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+                fi
+                # 如果仍然失败，从 sing-box.app 安装脚本页面获取
+                if [ -z "$SB_VERSION" ]; then
+                    SB_VERSION=$(curl -sfL "https://sing-box.app/install.sh" 2>/dev/null \
+                        | grep -oP 'LATEST_VERSION="?\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+                fi
+                # 最终回退到已知稳定版本
+                if [ -z "$SB_VERSION" ]; then
+                    SB_VERSION="1.11.1"
+                    warn "无法自动获取最新版本，使用回退版本: $SB_VERSION"
+                fi
+                info "目标版本: sing-box v${SB_VERSION} (${ARCH})"
+                local DL_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/sing-box-${SB_VERSION}-linux-${ARCH}.tar.gz"
+                local TMP_DIR
+                TMP_DIR=$(mktemp -d)
+                if curl -fSL --retry 3 --retry-delay 5 "$DL_URL" -o "${TMP_DIR}/sing-box.tar.gz"; then
+                    tar -xzf "${TMP_DIR}/sing-box.tar.gz" -C "${TMP_DIR}"
+                    local BIN_PATH
+                    BIN_PATH=$(find "${TMP_DIR}" -name sing-box -type f | head -1)
+                    if [ -n "$BIN_PATH" ] && [ -f "$BIN_PATH" ]; then
+                        install -m 755 "$BIN_PATH" /usr/bin/sing-box
+                        repo_ok=true
+                        info "sing-box 二进制文件已安装到 /usr/bin/sing-box"
+                    else
+                        err "解压后未找到 sing-box 可执行文件"
+                    fi
+                else
+                    err "下载 sing-box 二进制文件失败"
+                fi
+                rm -rf "${TMP_DIR}"
+            fi
+
+            if ! $repo_ok; then
+                err "所有安装方法均失败，请检查网络连接"
                 exit 1
-            }
+            fi
             ;;
         *)
             err "未支持的系统,无法安装 sing-box"

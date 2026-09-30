@@ -4,7 +4,7 @@ set -euo pipefail
 # ==============================================================================
 # Incudal Sing-box NAT/VPS 一键安装脚本
 # 特性:
-#   1. 仅保留安全可靠的 TCP 协议 (VLESS Reality / Shadowsocks 2022 / AnyTLS Reality)
+#   1. 仅保留安全可靠的 TCP 协议 (VLESS Reality / VMess / Shadowsocks 2022 / AnyTLS Reality)
 #   2. 彻底禁用 HY2/TUIC 等易受 GFW 阻断及防火墙限制的 UDP/QUIC 协议
 #   3. 内置丰富的优质 SNI 伪装域名池，默认随机选取，防止节点伪装单一
 #   4. 适配 Alpine (OpenRC) 与 Debian/Ubuntu/CentOS (Systemd)
@@ -188,27 +188,30 @@ fi
 select_protocols() {
     info "=== 选择要部署的协议 (已取消HY2/QUIC，纯净TCP保障防火墙安全) ==="
     echo "1) VLESS Reality (推荐, 默认)"
-    echo "2) Shadowsocks (SS 2022 / AEAD)"
-    echo "3) AnyTLS Reality"
+    echo "2) VMess (TLS + WS)"
+    echo "3) Shadowsocks (SS 2022 / AEAD)"
+    echo "4) AnyTLS Reality"
     echo ""
     echo "请输入要部署的协议编号(回车默认 1, 多个用空格分隔如: 1 2):"
     read -r protocol_input
     protocol_input="${protocol_input:-1}"
     
     ENABLE_REALITY=false
+    ENABLE_VMESS=false
     ENABLE_SS=false
     ENABLE_ANYTLS=false
     
     for num in $protocol_input; do
         case "$num" in
             1) ENABLE_REALITY=true ;;
-            2) ENABLE_SS=true ;;
-            3) ENABLE_ANYTLS=true ;;
+            2) ENABLE_VMESS=true ;;
+            3) ENABLE_SS=true ;;
+            4) ENABLE_ANYTLS=true ;;
             *) warn "无效选项: $num" ;;
         esac
     done
     
-    if ! $ENABLE_REALITY && ! $ENABLE_SS && ! $ENABLE_ANYTLS; then
+    if ! $ENABLE_REALITY && ! $ENABLE_VMESS && ! $ENABLE_SS && ! $ENABLE_ANYTLS; then
         err "未选择任何协议,退出安装"
         exit 1
     fi
@@ -217,16 +220,19 @@ select_protocols() {
     mkdir -p /etc/sing-box
     cat > /etc/sing-box/.protocols <<EOF
 ENABLE_REALITY=$ENABLE_REALITY
+ENABLE_VMESS=$ENABLE_VMESS
 ENABLE_SS=$ENABLE_SS
 ENABLE_ANYTLS=$ENABLE_ANYTLS
 EOF
     
     info "已选择协议:"
     $ENABLE_REALITY && echo "  - VLESS Reality"
+    $ENABLE_VMESS && echo "  - VMess (TLS + WS)"
     $ENABLE_SS && echo "  - Shadowsocks"
     $ENABLE_ANYTLS && echo "  - AnyTLS Reality"
     
     export ENABLE_REALITY
+    export ENABLE_VMESS
     export ENABLE_SS
     export ENABLE_ANYTLS
 }
@@ -285,10 +291,27 @@ else
     REALITY_SNI="$RANDOM_DEFAULT_SNI"
 fi
 
+# 如果选择了 VMess 协议，询问 VMess TLS SNI 伪装域名
+VMESS_SNI=""
+if $ENABLE_VMESS; then
+    echo ""
+    if [ -n "$CUSTOM_IP" ] && ! [[ "$CUSTOM_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        DEFAULT_VMESS_SNI="$CUSTOM_IP"
+    else
+        DEFAULT_VMESS_SNI="${REALITY_SNI:-$RANDOM_DEFAULT_SNI}"
+    fi
+    info "VMess TLS 推荐 SNI: \033[1;32m${DEFAULT_VMESS_SNI}\033[0m"
+    echo "请输入 VMess TLS SNI 伪装域名 (留空直接回车使用推荐: ${DEFAULT_VMESS_SNI}):"
+    read -r USER_VMESS_SNI
+    VMESS_SNI="${USER_VMESS_SNI:-$DEFAULT_VMESS_SNI}"
+    VMESS_SNI="$(echo "$VMESS_SNI" | tr -d '[:space:]')"
+fi
+
 # 将用户选择写入缓存
 mkdir -p /etc/sing-box
 echo "CUSTOM_IP=$CUSTOM_IP" > /etc/sing-box/.config_cache.tmp || true
 echo "REALITY_SNI=$REALITY_SNI" >> /etc/sing-box/.config_cache.tmp || true
+echo "VMESS_SNI=$VMESS_SNI" >> /etc/sing-box/.config_cache.tmp || true
 if [ -f /etc/sing-box/.config_cache ]; then
     awk 'FNR==NR{a[$1]=1;next} {split($0,k,"="); if(!(k[1] in a)) print $0}' /etc/sing-box/.config_cache.tmp /etc/sing-box/.config_cache >> /etc/sing-box/.config_cache.tmp2 || true
     mv /etc/sing-box/.config_cache.tmp2 /etc/sing-box/.config_cache.tmp || true
@@ -311,6 +334,24 @@ get_config() {
         UUID=$(rand_uuid)
         info "VLESS Reality 端口: $PORT_REALITY"
         info "VLESS Reality UUID 已自动生成"
+    fi
+
+    if $ENABLE_VMESS; then
+        info "=== 配置 VMess (TLS + WS) ==="
+        if [ -n "${SINGBOX_PORT_VMESS:-}" ]; then
+            PORT_VMESS="$SINGBOX_PORT_VMESS"
+        else
+            read -p "请输入 VMess 端口 (留空则随机 10000-60000): " USER_PORT_VMESS
+            PORT_VMESS="${USER_PORT_VMESS:-$(rand_port)}"
+        fi
+        read -p "请输入 VMess WebSocket 路径 (留空默认 /vmess-ws): " USER_VMESS_PATH
+        VMESS_PATH="${USER_VMESS_PATH:-/vmess-ws}"
+        [[ ! "$VMESS_PATH" =~ ^/ ]] && VMESS_PATH="/$VMESS_PATH"
+
+        VMESS_UUID=$(rand_uuid)
+        info "VMess 端口: $PORT_VMESS"
+        info "VMess WS 路径: $VMESS_PATH"
+        info "VMess UUID 已自动生成"
     fi
 
     if $ENABLE_SS; then
@@ -374,10 +415,94 @@ install_singbox() {
             }
             ;;
         debian|redhat)
-            bash <(curl -fsSL https://sing-box.app/install.sh) || {
-                err "sing-box 安装失败"
+            # 方法1: 使用官方 apt/rpm 仓库 (不走 GitHub API，避免共享 IP 触发限流)
+            local repo_ok=false
+            if [ "$OS" = "debian" ]; then
+                info "尝试通过官方 apt 仓库安装 sing-box..."
+                mkdir -p /etc/apt/keyrings
+                if curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc 2>/dev/null; then
+                    chmod a+r /etc/apt/keyrings/sagernet.asc
+                    cat > /etc/apt/sources.list.d/sagernet.list <<'APTSRC'
+deb [signed-by=/etc/apt/keyrings/sagernet.asc] https://deb.sagernet.org/ * *
+APTSRC
+                    if apt-get update -y 2>/dev/null && apt-get install -y sing-box 2>/dev/null; then
+                        repo_ok=true
+                        info "通过官方 apt 仓库安装成功"
+                    else
+                        warn "apt 仓库安装失败，尝试备用方法..."
+                        rm -f /etc/apt/sources.list.d/sagernet.list
+                    fi
+                else
+                    warn "获取 GPG 密钥失败，尝试备用方法..."
+                fi
+            fi
+
+            # 方法2: 官方一键脚本 (会调用 GitHub API)
+            if ! $repo_ok; then
+                info "尝试通过官方一键脚本安装 sing-box..."
+                if bash <(curl -fsSL https://sing-box.app/install.sh) 2>/dev/null; then
+                    repo_ok=true
+                    info "通过官方一键脚本安装成功"
+                else
+                    warn "官方脚本安装失败 (可能是 GitHub API 限流)，尝试直接下载二进制..."
+                fi
+            fi
+
+            # 方法3: 直接下载二进制文件 (完全绕过 GitHub API)
+            if ! $repo_ok; then
+                info "尝试直接下载 sing-box 二进制文件..."
+                local ARCH
+                case "$(uname -m)" in
+                    x86_64|amd64) ARCH="amd64" ;;
+                    aarch64|arm64) ARCH="arm64" ;;
+                    armv7l) ARCH="armv7" ;;
+                    *) err "不支持的架构: $(uname -m)"; exit 1 ;;
+                esac
+                # 尝试通过 SourceForge 镜像获取最新版本或使用固定稳定版
+                local SB_VERSION=""
+                # 先尝试从 GitHub API 获取版本 (可能被限流)
+                SB_VERSION=$(curl -sfL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
+                    | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/' || true)
+                # 如果 API 失败，从网页抓取版本号
+                if [ -z "$SB_VERSION" ]; then
+                    SB_VERSION=$(curl -sfL "https://github.com/SagerNet/sing-box/releases/latest" 2>/dev/null \
+                        -o /dev/null -w '%{redirect_url}' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+                fi
+                # 如果仍然失败，从 sing-box.app 安装脚本页面获取
+                if [ -z "$SB_VERSION" ]; then
+                    SB_VERSION=$(curl -sfL "https://sing-box.app/install.sh" 2>/dev/null \
+                        | grep -oP 'LATEST_VERSION="?\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+                fi
+                # 最终回退到已知稳定版本
+                if [ -z "$SB_VERSION" ]; then
+                    SB_VERSION="1.11.1"
+                    warn "无法自动获取最新版本，使用回退版本: $SB_VERSION"
+                fi
+                info "目标版本: sing-box v${SB_VERSION} (${ARCH})"
+                local DL_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/sing-box-${SB_VERSION}-linux-${ARCH}.tar.gz"
+                local TMP_DIR
+                TMP_DIR=$(mktemp -d)
+                if curl -fSL --retry 3 --retry-delay 5 "$DL_URL" -o "${TMP_DIR}/sing-box.tar.gz"; then
+                    tar -xzf "${TMP_DIR}/sing-box.tar.gz" -C "${TMP_DIR}"
+                    local BIN_PATH
+                    BIN_PATH=$(find "${TMP_DIR}" -name sing-box -type f | head -1)
+                    if [ -n "$BIN_PATH" ] && [ -f "$BIN_PATH" ]; then
+                        install -m 755 "$BIN_PATH" /usr/bin/sing-box
+                        repo_ok=true
+                        info "sing-box 二进制文件已安装到 /usr/bin/sing-box"
+                    else
+                        err "解压后未找到 sing-box 可执行文件"
+                    fi
+                else
+                    err "下载 sing-box 二进制文件失败"
+                fi
+                rm -rf "${TMP_DIR}"
+            fi
+
+            if ! $repo_ok; then
+                err "所有安装方法均失败，请检查网络连接"
                 exit 1
-            }
+            fi
             ;;
         *)
             err "未支持的系统,无法安装 sing-box"
@@ -438,6 +563,37 @@ generate_reality_keys() {
 generate_reality_keys
 
 # -----------------------
+# 生成 VMess TLS 证书
+generate_vmess_cert() {
+    if ! $ENABLE_VMESS; then
+        return 0
+    fi
+    info "配置 VMess TLS 证书..."
+    mkdir -p /etc/sing-box
+    local cert_file="/etc/sing-box/vmess.crt"
+    local key_file="/etc/sing-box/vmess.key"
+    
+    if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$key_file" \
+            -out "$cert_file" \
+            -days 3650 \
+            -subj "/CN=${VMESS_SNI}" >/dev/null 2>&1 || {
+            openssl req -x509 -newkey rsa:2048 -nodes \
+                -keyout "$key_file" \
+                -out "$cert_file" \
+                -days 3650 \
+                -subj "/CN=${VMESS_SNI}" >/dev/null 2>&1
+        }
+        info "已自动生成 VMess TLS 自签名证书 (有效期 10 年, 域名: ${VMESS_SNI})"
+    else
+        info "使用已有 VMess 证书: $cert_file"
+    fi
+}
+
+generate_vmess_cert
+
+# -----------------------
 # 生成配置文件
 CONFIG_PATH="/etc/sing-box/config.json"
 
@@ -485,6 +641,40 @@ INBOUND_REALITY
         sed -i "s|REALITY_PK_PLACEHOLDER|$REALITY_PK|g" "$TEMP_INBOUNDS"
         sed -i "s|REALITY_SID_PLACEHOLDER|$REALITY_SID|g" "$TEMP_INBOUNDS"
         sed -i "s|REALITY_SNI_PLACEHOLDER|$REALITY_SNI|g" "$TEMP_INBOUNDS"
+        need_comma=true
+    fi
+
+    if $ENABLE_VMESS; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_VMESS'
+    {
+      "type": "vmess",
+      "tag": "vmess-in",
+      "listen": "::",
+      "listen_port": PORT_VMESS_PLACEHOLDER,
+      "users": [
+        {
+          "name": "default",
+          "uuid": "UUID_VMESS_PLACEHOLDER",
+          "alterId": 0
+        }
+      ],
+      "transport": {
+        "type": "ws",
+        "path": "PATH_VMESS_PLACEHOLDER"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "SNI_VMESS_PLACEHOLDER",
+        "certificate_path": "/etc/sing-box/vmess.crt",
+        "key_path": "/etc/sing-box/vmess.key"
+      }
+    }
+INBOUND_VMESS
+        sed -i "s|PORT_VMESS_PLACEHOLDER|$PORT_VMESS|g" "$TEMP_INBOUNDS"
+        sed -i "s|UUID_VMESS_PLACEHOLDER|$VMESS_UUID|g" "$TEMP_INBOUNDS"
+        sed -i "s|PATH_VMESS_PLACEHOLDER|$VMESS_PATH|g" "$TEMP_INBOUNDS"
+        sed -i "s|SNI_VMESS_PLACEHOLDER|$VMESS_SNI|g" "$TEMP_INBOUNDS"
         need_comma=true
     fi
 
@@ -586,6 +776,7 @@ CONFIG_TAIL
     # 保存配置缓存
     cat > /etc/sing-box/.config_cache <<CACHEEOF
 ENABLE_REALITY=$ENABLE_REALITY
+ENABLE_VMESS=$ENABLE_VMESS
 ENABLE_SS=$ENABLE_SS
 ENABLE_ANYTLS=$ENABLE_ANYTLS
 CACHEEOF
@@ -597,6 +788,13 @@ REALITY_PK=$REALITY_PK
 REALITY_SID=$REALITY_SID
 REALITY_PUB=$REALITY_PUB
 REALITY_SNI=$REALITY_SNI
+CACHEEOF
+
+    $ENABLE_VMESS && cat >> /etc/sing-box/.config_cache <<CACHEEOF
+VMESS_PORT=$PORT_VMESS
+VMESS_UUID=$VMESS_UUID
+VMESS_PATH=$VMESS_PATH
+VMESS_SNI=$VMESS_SNI
 CACHEEOF
 
     $ENABLE_SS && cat >> /etc/sing-box/.config_cache <<CACHEEOF
@@ -757,6 +955,15 @@ generate_uris() {
         echo ""
     fi
 
+    if $ENABLE_VMESS; then
+        local vmess_json="{\"v\":\"2\",\"ps\":\"vmess${suffix}\",\"add\":\"${host}\",\"port\":\"${PORT_VMESS}\",\"id\":\"${VMESS_UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${VMESS_SNI}\",\"path\":\"${VMESS_PATH}\",\"tls\":\"tls\",\"sni\":\"${VMESS_SNI}\"}"
+        local vmess_b64
+        vmess_b64=$(printf "%s" "$vmess_json" | base64 -w0 2>/dev/null || printf "%s" "$vmess_json" | base64 | tr -d '\n')
+        echo "=== VMess (TLS + WS) ==="
+        echo "vmess://${vmess_b64}"
+        echo ""
+    fi
+
     if $ENABLE_SS; then
         local ss_userinfo="${SS_METHOD}:${PSK_SS}"
         ss_encoded=$(printf "%s" "$ss_userinfo" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
@@ -786,6 +993,7 @@ echo "=========================================="
 echo ""
 info "📋 配置信息:"
 $ENABLE_REALITY && echo "   VLESS Reality 端口: $PORT_REALITY | UUID: $UUID"
+$ENABLE_VMESS && echo "   VMess (TLS+WS) 端口: $PORT_VMESS | UUID: $VMESS_UUID | WS 路径: $VMESS_PATH | SNI: $VMESS_SNI"
 $ENABLE_SS && echo "   SS 端口: $PORT_SS | 密码: $PSK_SS | 加密: $SS_METHOD"
 $ENABLE_ANYTLS && echo "   AnyTLS 端口: $PORT_ANYTLS | 用户: $ANYTLS_USER | 密码: $ANYTLS_PSK"
 echo "   连接地址: $PUB_IP"
@@ -902,11 +1110,21 @@ read_config() {
     
     REALITY_SNI="${REALITY_SNI:-gateway.icloud.com}"
     ENABLE_REALITY="${ENABLE_REALITY:-false}"
+    ENABLE_VMESS="${ENABLE_VMESS:-false}"
     ENABLE_SS="${ENABLE_SS:-false}"
     ENABLE_ANYTLS="${ENABLE_ANYTLS:-false}"
     CUSTOM_IP="${CUSTOM_IP:-}"
 
     # 读取各协议配置
+    if [ "${ENABLE_VMESS:-false}" = "true" ]; then
+        VMESS_PORT=$(jq -r '.inbounds[] | select(.type=="vmess") | .listen_port // empty' "$CONFIG_PATH" | head -n1)
+        VMESS_UUID=$(jq -r '.inbounds[] | select(.type=="vmess") | .users[0].uuid // empty' "$CONFIG_PATH" | head -n1)
+        VMESS_PATH=$(jq -r '.inbounds[] | select(.type=="vmess") | .transport.path // "/vmess-ws"' "$CONFIG_PATH" | head -n1)
+        VMESS_SNI=$(jq -r '.inbounds[] | select(.type=="vmess") | .tls.server_name // empty' "$CONFIG_PATH" | head -n1)
+        VMESS_PATH="${VMESS_PATH:-/vmess-ws}"
+        VMESS_SNI="${VMESS_SNI:-$REALITY_SNI}"
+    fi
+
     if [ "${ENABLE_SS:-false}" = "true" ]; then
         SS_PORT=$(jq -r '.inbounds[] | select(.type=="shadowsocks") | .listen_port // empty' "$CONFIG_PATH" | head -n1)
         SS_PSK=$(jq -r '.inbounds[] | select(.type=="shadowsocks") | .password // empty' "$CONFIG_PATH" | head -n1)
@@ -966,6 +1184,15 @@ generate_uris() {
     if [ "${ENABLE_REALITY:-false}" = "true" ]; then
         echo "=== VLESS Reality ===" >> "$URI_FILE"
         echo "vless://${REALITY_UUID}@${PUBLIC_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}#reality${node_suffix}" >> "$URI_FILE"
+        echo "" >> "$URI_FILE"
+    fi
+
+    if [ "${ENABLE_VMESS:-false}" = "true" ]; then
+        local vmess_json="{\"v\":\"2\",\"ps\":\"vmess${node_suffix}\",\"add\":\"${PUBLIC_IP}\",\"port\":\"${VMESS_PORT}\",\"id\":\"${VMESS_UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${VMESS_SNI}\",\"path\":\"${VMESS_PATH}\",\"tls\":\"tls\",\"sni\":\"${VMESS_SNI}\"}"
+        local vmess_b64
+        vmess_b64=$(printf "%s" "$vmess_json" | base64 -w0 2>/dev/null || printf "%s" "$vmess_json" | base64 | tr -d '\n')
+        echo "=== VMess (TLS + WS) ===" >> "$URI_FILE"
+        echo "vmess://${vmess_b64}" >> "$URI_FILE"
         echo "" >> "$URI_FILE"
     fi
 
@@ -1046,6 +1273,33 @@ action_reset_reality() {
     ' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
     
     info "已启动服务并更新 Vless Reality 端口: $new_port"
+    service_start || warn "启动服务失败"
+    sleep 1
+    generate_uris || warn "生成 URI 失败"
+}
+
+# 重置 VMess 端口
+action_reset_vmess() {
+    read_config || return 1
+    
+    if [ "${ENABLE_VMESS:-false}" != "true" ]; then
+        err "VMess 协议未启用"
+        return 1
+    fi
+    
+    read -p "输入新的 VMess 端口(回车保持 $VMESS_PORT): " new_port
+    new_port="${new_port:-$VMESS_PORT}"
+    
+    info "正在停止服务..."
+    service_stop || warn "停止服务失败"
+    
+    cp "$CONFIG_PATH" "${CONFIG_PATH}.bak"
+    
+    jq --argjson port "$new_port" '
+    .inbounds |= map(if .type=="vmess" then .listen_port = $port else . end)
+    ' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+    
+    info "已启动服务并更新 VMess 端口: $new_port"
     service_start || warn "启动服务失败"
     sleep 1
     generate_uris || warn "生成 URI 失败"
@@ -1372,6 +1626,404 @@ RELAY_EOF
     info "复制执行完成后，即可在线路机完成 sing-box 中转节点部署。"
 }
 
+# 重新安装其它协议 (删除当前协议并安装新协议)
+action_reinstall_protocols() {
+    echo ""
+    info "=========================================="
+    info "=== 重新安装其它协议 (将删除当前协议配置) ==="
+    info "=========================================="
+    read -p "确认重新安装其它协议? 当前所有节点协议将被覆盖(y/N): " confirm_reinstall
+    if [[ ! "$confirm_reinstall" =~ ^[Yy]$ ]]; then
+        info "已取消重新安装"
+        return 0
+    fi
+
+    # 1. 选择新协议
+    echo ""
+    info "=== 选择要部署的协议 (纯净TCP保障防火墙安全) ==="
+    echo "1) VLESS Reality (推荐, 默认)"
+    echo "2) VMess (TLS + WS)"
+    echo "3) Shadowsocks (SS 2022 / AEAD)"
+    echo "4) AnyTLS Reality"
+    echo ""
+    read -p "请输入要部署的协议编号(回车默认 1, 多个用空格分隔如: 1 2): " protocol_input
+    protocol_input="${protocol_input:-1}"
+
+    local NEW_ENABLE_REALITY=false
+    local NEW_ENABLE_VMESS=false
+    local NEW_ENABLE_SS=false
+    local NEW_ENABLE_ANYTLS=false
+
+    for num in $protocol_input; do
+        case "$num" in
+            1) NEW_ENABLE_REALITY=true ;;
+            2) NEW_ENABLE_VMESS=true ;;
+            3) NEW_ENABLE_SS=true ;;
+            4) NEW_ENABLE_ANYTLS=true ;;
+            *) warn "无效选项: $num" ;;
+        esac
+    done
+
+    if ! $NEW_ENABLE_REALITY && ! $NEW_ENABLE_VMESS && ! $NEW_ENABLE_SS && ! $NEW_ENABLE_ANYTLS; then
+        err "未选择任何有效协议，取消操作"
+        return 1
+    fi
+
+    # 2. 如果选了 SS，选择加密方式
+    local NEW_SS_METHOD="2022-blake3-aes-128-gcm"
+    if $NEW_ENABLE_SS; then
+        echo ""
+        info "=== 选择 Shadowsocks 加密方式 ==="
+        echo "1) 2022-blake3-aes-128-gcm (推荐)"
+        echo "2) aes-128-gcm"
+        read -p "请输入选择(默认为 1): " ss_method_choice
+        case "${ss_method_choice:-1}" in
+            1) NEW_SS_METHOD="2022-blake3-aes-128-gcm" ;;
+            2) NEW_SS_METHOD="aes-128-gcm" ;;
+            *) NEW_SS_METHOD="2022-blake3-aes-128-gcm" ;;
+        esac
+    fi
+
+    # 3. 节点连接 IP 或 DDNS
+    echo ""
+    read_config 2>/dev/null || true
+    local default_ip="${CUSTOM_IP:-$(get_public_ip)}"
+    read -p "请输入节点连接 IP 或 DDNS 域名 (留空保持: ${default_ip}): " user_custom_ip
+    user_custom_ip="$(echo "${user_custom_ip:-$default_ip}" | tr -d '[:space:]')"
+
+    # 4. 如果选了 Reality (VLESS 或 AnyTLS)，配置 SNI
+    local NEW_REALITY_SNI=""
+    if $NEW_ENABLE_REALITY || $NEW_ENABLE_ANYTLS; then
+        local sni_pool=(
+            "gateway.icloud.com"
+            "itunes.apple.com"
+            "download.apple.com"
+            "mask.icloud.com"
+            "learn.microsoft.com"
+            "azure.microsoft.com"
+            "www.microsoft.com"
+            "edge.microsoft.com"
+            "dl-cdn.alpinelinux.org"
+            "deb.debian.org"
+            "cloudflare.com"
+            "aws.amazon.com"
+            "www.speedtest.net"
+            "www.nvidia.com"
+        )
+        local random_sni="${sni_pool[$((RANDOM % ${#sni_pool[@]}))]}"
+        local current_sni="${REALITY_SNI:-$random_sni}"
+        echo ""
+        info "已推荐 SNI: \033[1;32m${current_sni}\033[0m"
+        read -p "请输入 Reality 的 SNI 伪装域名 (留空保持: ${current_sni}): " user_sni
+        NEW_REALITY_SNI="${user_sni:-$current_sni}"
+        NEW_REALITY_SNI="$(echo "$NEW_REALITY_SNI" | tr -d '[:space:]')"
+    fi
+
+    # 5. 配置各协议端口和凭据
+    local NEW_PORT_REALITY=""
+    local NEW_UUID=""
+    if $NEW_ENABLE_REALITY; then
+        echo ""
+        info "=== 配置 VLESS Reality ==="
+        read -p "请输入 VLESS Reality 端口 (留空则随机 10000-60000): " input_port
+        NEW_PORT_REALITY="${input_port:-$(rand_port)}"
+        NEW_UUID=$(rand_uuid)
+        info "VLESS Reality 端口: $NEW_PORT_REALITY | UUID 已自动生成"
+    fi
+
+    local NEW_PORT_VMESS=""
+    local NEW_VMESS_UUID=""
+    local NEW_VMESS_PATH=""
+    local NEW_VMESS_SNI=""
+    if $NEW_ENABLE_VMESS; then
+        echo ""
+        info "=== 配置 VMess (TLS + WS) ==="
+        read -p "请输入 VMess 端口 (留空则随机 10000-60000): " input_port
+        NEW_PORT_VMESS="${input_port:-$(rand_port)}"
+        read -p "请输入 VMess WebSocket 路径 (留空默认 /vmess-ws): " input_path
+        NEW_VMESS_PATH="${input_path:-/vmess-ws}"
+        [[ ! "$NEW_VMESS_PATH" =~ ^/ ]] && NEW_VMESS_PATH="/$NEW_VMESS_PATH"
+
+        local default_vmess_sni
+        if [ -n "$user_custom_ip" ] && ! [[ "$user_custom_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            default_vmess_sni="$user_custom_ip"
+        else
+            default_vmess_sni="${NEW_REALITY_SNI:-gateway.icloud.com}"
+        fi
+        read -p "请输入 VMess TLS SNI 伪装域名 (留空保持: ${default_vmess_sni}): " input_vmess_sni
+        NEW_VMESS_SNI="${input_vmess_sni:-$default_vmess_sni}"
+        NEW_VMESS_SNI="$(echo "$NEW_VMESS_SNI" | tr -d '[:space:]')"
+
+        NEW_VMESS_UUID=$(rand_uuid)
+        info "VMess 端口: $NEW_PORT_VMESS | WS 路径: $NEW_VMESS_PATH | SNI: $NEW_VMESS_SNI"
+        info "VMess UUID 已自动生成"
+
+        # 生成证书
+        mkdir -p /etc/sing-box
+        if [ ! -f /etc/sing-box/vmess.crt ] || [ ! -f /etc/sing-box/vmess.key ]; then
+            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+                -keyout /etc/sing-box/vmess.key -out /etc/sing-box/vmess.crt -days 3650 \
+                -subj "/CN=${NEW_VMESS_SNI}" >/dev/null 2>&1 || {
+                openssl req -x509 -newkey rsa:2048 -nodes \
+                    -keyout /etc/sing-box/vmess.key -out /etc/sing-box/vmess.crt -days 3650 \
+                    -subj "/CN=${NEW_VMESS_SNI}" >/dev/null 2>&1
+            }
+        fi
+    fi
+
+    local NEW_PORT_SS=""
+    local NEW_PSK_SS=""
+    if $NEW_ENABLE_SS; then
+        echo ""
+        info "=== 配置 Shadowsocks (SS) ==="
+        read -p "请输入 SS 端口 (留空则随机 10000-60000): " input_port
+        NEW_PORT_SS="${input_port:-$(rand_port)}"
+        NEW_PSK_SS=$(rand_pass)
+        info "SS 端口: $NEW_PORT_SS | 加密方式: $NEW_SS_METHOD | 密码已自动生成"
+    fi
+
+    local NEW_PORT_ANYTLS=""
+    local NEW_ANYTLS_USER=""
+    local NEW_ANYTLS_PSK=""
+    if $NEW_ENABLE_ANYTLS; then
+        echo ""
+        info "=== 配置 AnyTLS Reality ==="
+        read -p "请输入 AnyTLS Reality 端口 (留空则随机 10000-60000): " input_port
+        NEW_PORT_ANYTLS="${input_port:-$(rand_port)}"
+        NEW_ANYTLS_USER=$(openssl rand -hex 4)
+        NEW_ANYTLS_PSK=$(openssl rand -base64 16)
+        info "AnyTLS Reality 端口: $NEW_PORT_ANYTLS | 用户名: $NEW_ANYTLS_USER | 密码已自动生成"
+    fi
+
+    # 6. 生成 Reality 密钥对 (如需要)
+    local NEW_REALITY_PK=""
+    local NEW_REALITY_PUB=""
+    local NEW_REALITY_SID=""
+    if $NEW_ENABLE_REALITY || $NEW_ENABLE_ANYTLS; then
+        info "生成 Reality 密钥对..."
+        local reality_keys
+        reality_keys=$(sing-box generate reality-keypair 2>&1) || {
+            err "生成 Reality 密钥失败"
+            return 1
+        }
+        NEW_REALITY_PK=$(echo "$reality_keys" | grep "PrivateKey" | awk '{print $NF}' | tr -d '\r')
+        NEW_REALITY_PUB=$(echo "$reality_keys" | grep "PublicKey" | awk '{print $NF}' | tr -d '\r')
+        NEW_REALITY_SID=$(sing-box generate rand 8 --hex 2>&1) || {
+            err "生成 Reality ShortID 失败"
+            return 1
+        }
+        echo -n "$NEW_REALITY_PUB" > /etc/sing-box/.reality_pub
+        echo -n "$NEW_REALITY_SID" > /etc/sing-box/.reality_sid
+    fi
+
+    # 7. 停止服务并备份旧配置
+    info "正在停止 sing-box 服务..."
+    service_stop || warn "停止服务失败"
+    [ -f "$CONFIG_PATH" ] && cp "$CONFIG_PATH" "${CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
+
+    # 8. 生成新配置文件
+    info "正在写入新配置文件..."
+    local TEMP_INBOUNDS="/tmp/singbox_inbounds_$$.json"
+    > "$TEMP_INBOUNDS"
+    local need_comma=false
+
+    if $NEW_ENABLE_REALITY; then
+        cat >> "$TEMP_INBOUNDS" <<INBOUND_REALITY
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "::",
+      "listen_port": $NEW_PORT_REALITY,
+      "users": [
+        {
+          "uuid": "$NEW_UUID",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "$NEW_REALITY_SNI",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "$NEW_REALITY_SNI",
+            "server_port": 443
+          },
+          "private_key": "$NEW_REALITY_PK",
+          "short_id": ["$NEW_REALITY_SID"]
+        }
+      }
+    }
+INBOUND_REALITY
+        need_comma=true
+    fi
+
+    if $NEW_ENABLE_VMESS; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<INBOUND_VMESS
+    {
+      "type": "vmess",
+      "tag": "vmess-in",
+      "listen": "::",
+      "listen_port": $NEW_PORT_VMESS,
+      "users": [
+        {
+          "name": "default",
+          "uuid": "$NEW_VMESS_UUID",
+          "alterId": 0
+        }
+      ],
+      "transport": {
+        "type": "ws",
+        "path": "$NEW_VMESS_PATH"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "$NEW_VMESS_SNI",
+        "certificate_path": "/etc/sing-box/vmess.crt",
+        "key_path": "/etc/sing-box/vmess.key"
+      }
+    }
+INBOUND_VMESS
+        need_comma=true
+    fi
+
+    if $NEW_ENABLE_SS; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<INBOUND_SS
+    {
+      "type": "shadowsocks",
+      "listen": "::",
+      "listen_port": $NEW_PORT_SS,
+      "method": "$NEW_SS_METHOD",
+      "password": "$NEW_PSK_SS",
+      "tag": "ss-in"
+    }
+INBOUND_SS
+        need_comma=true
+    fi
+
+    if $NEW_ENABLE_ANYTLS; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<INBOUND_ANYTLS
+    {
+      "type": "anytls",
+      "tag": "anytls-in",
+      "listen": "::",
+      "listen_port": $NEW_PORT_ANYTLS,
+      "users": [
+        {
+          "name": "$NEW_ANYTLS_USER",
+          "password": "$NEW_ANYTLS_PSK"
+        }
+      ],
+      "padding_scheme": [],
+      "tls": {
+        "enabled": true,
+        "server_name": "$NEW_REALITY_SNI",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "$NEW_REALITY_SNI",
+            "server_port": 443
+          },
+          "private_key": "$NEW_REALITY_PK",
+          "short_id": [
+            "$NEW_REALITY_SID"
+          ]
+        }
+      }
+    }
+INBOUND_ANYTLS
+        need_comma=true
+    fi
+
+    cat > "$CONFIG_PATH" <<CONFIG_HEAD
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "ntp": {
+    "enabled": true,
+    "server": "time.apple.com",
+    "server_port": 123,
+    "interval": "30m"
+  },
+  "inbounds": [
+CONFIG_HEAD
+
+    cat "$TEMP_INBOUNDS" >> "$CONFIG_PATH"
+    rm -f "$TEMP_INBOUNDS"
+
+    cat >> "$CONFIG_PATH" <<'CONFIG_TAIL'
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct-out"
+    }
+  ]
+}
+CONFIG_TAIL
+
+    # 9. 保存协议标记与缓存
+    cat > /etc/sing-box/.protocols <<EOF
+ENABLE_REALITY=$NEW_ENABLE_REALITY
+ENABLE_VMESS=$NEW_ENABLE_VMESS
+ENABLE_SS=$NEW_ENABLE_SS
+ENABLE_ANYTLS=$NEW_ENABLE_ANYTLS
+EOF
+
+    cat > "$CACHE_FILE" <<CACHEEOF
+ENABLE_REALITY=$NEW_ENABLE_REALITY
+ENABLE_VMESS=$NEW_ENABLE_VMESS
+ENABLE_SS=$NEW_ENABLE_SS
+ENABLE_ANYTLS=$NEW_ENABLE_ANYTLS
+CUSTOM_IP=$user_custom_ip
+CACHEEOF
+
+    $NEW_ENABLE_REALITY && cat >> "$CACHE_FILE" <<CACHEEOF
+REALITY_PORT=$NEW_PORT_REALITY
+REALITY_UUID=$NEW_UUID
+REALITY_PK=$NEW_REALITY_PK
+REALITY_SID=$NEW_REALITY_SID
+REALITY_PUB=$NEW_REALITY_PUB
+REALITY_SNI=$NEW_REALITY_SNI
+CACHEEOF
+
+    $NEW_ENABLE_VMESS && cat >> "$CACHE_FILE" <<CACHEEOF
+VMESS_PORT=$NEW_PORT_VMESS
+VMESS_UUID=$NEW_VMESS_UUID
+VMESS_PATH=$NEW_VMESS_PATH
+VMESS_SNI=$NEW_VMESS_SNI
+CACHEEOF
+
+    $NEW_ENABLE_SS && cat >> "$CACHE_FILE" <<CACHEEOF
+SS_PORT=$NEW_PORT_SS
+SS_PSK=$NEW_PSK_SS
+SS_METHOD=$NEW_SS_METHOD
+CACHEEOF
+
+    $NEW_ENABLE_ANYTLS && cat >> "$CACHE_FILE" <<CACHEEOF
+ANYTLS_PORT=$NEW_PORT_ANYTLS
+ANYTLS_USER=$NEW_ANYTLS_USER
+ANYTLS_PSK=$NEW_ANYTLS_PSK
+CACHEEOF
+
+    # 10. 检查配置并启动服务
+    if command -v sing-box >/dev/null 2>&1; then
+        sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1 && info "新配置文件验证通过" || warn "配置文件验证未通过，请检查"
+    fi
+
+    info "正在启动服务..."
+    service_start || warn "服务启动失败"
+    sleep 1
+
+    info "🎉 协议重新安装完成！"
+    action_view_uri || true
+}
+
 # 动态生成菜单
 show_menu() {
     read_config 2>/dev/null || true
@@ -1396,6 +2048,12 @@ MENU
         option=$((option + 1))
     fi
 
+    if [ "${ENABLE_VMESS:-false}" = "true" ]; then
+        echo "$option) 重置 VMess 端口"
+        MENU_MAP[$option]="reset_vmess"
+        option=$((option + 1))
+    fi
+
     if [ "${ENABLE_SS:-false}" = "true" ]; then
         echo "$option) 重置 SS 端口"
         MENU_MAP[$option]="reset_ss"
@@ -1414,27 +2072,31 @@ MENU
     option=$((option + 1))
     
     MENU_MAP[$option]="stop"
-    echo "$((option))) 停止服务"
+    echo "$option) 停止服务"
     option=$((option + 1))
     
     MENU_MAP[$option]="restart"
-    echo "$((option))) 重启服务"
+    echo "$option) 重启服务"
     option=$((option + 1))
     
     MENU_MAP[$option]="status"
-    echo "$((option))) 查看状态"
+    echo "$option) 查看状态"
     option=$((option + 1))
     
     MENU_MAP[$option]="update"
-    echo "$((option))) 更新 sing-box"
+    echo "$option) 更新 sing-box"
     option=$((option + 1))
     
     MENU_MAP[$option]="relay"
-    echo "$((option))) 生成中转线路机脚本(出口为本机 SS 协议)"
+    echo "$option) 生成中转线路机脚本(出口为本机 SS 协议)"
     option=$((option + 1))
     
     MENU_MAP[$option]="uninstall"
-    echo "$((option))) 卸载 sing-box"
+    echo "$option) 卸载 sing-box"
+    option=$((option + 1))
+
+    MENU_MAP[$option]="reinstall_protocols"
+    echo "$option) 重新安装其它协议"
     
     cat <<MENU2
 0) 退出
@@ -1459,6 +2121,7 @@ while true; do
             action="${MENU_MAP[$opt]:-}"
             case "$action" in
                 reset_reality) action_reset_reality ;;
+                reset_vmess) action_reset_vmess ;;
                 reset_ss) action_reset_ss ;;
                 reset_anytls) action_reset_anytls ;;
                 start) service_start && info "已启动" ;;
@@ -1468,6 +2131,7 @@ while true; do
                 update) action_update ;;
                 relay) action_generate_relay ;;
                 uninstall) action_uninstall; exit 0 ;;
+                reinstall_protocols) action_reinstall_protocols ;;
                 *) warn "无效选项: $opt" ;;
             esac
             ;;
