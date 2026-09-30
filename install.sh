@@ -2437,7 +2437,7 @@ configure_rfw_rules() {
 
     echo -e "  ┌─ 规则模式选择 ─────────────────────────────────────────────"
     echo -e "  │"
-    echo -e "  │   1) 一键开启母鸡防火墙 (推荐) ─ 全局禁用 HY2/TUIC/MTProto/Email，针对大陆屏蔽 SS/SOCKS5/HTTP/WG"
+    echo -e "  │   1) 一键开启母鸡防火墙 (推荐) ─ 全局禁用 HY2/TUIC/MTProto/Email，针对大陆屏蔽 SS/SOCKS5/HTTP/WG/Trojan"
     echo -e "  │                                  海外全放行(除HY2/TUIC/MTProto)，默认 SKB 模式兼容所有网卡"
     echo -e "  │   2) 自定义配置规则            ─ 手动选择屏蔽协议、GeoIP过滤模式与端口日志"
     echo -e "  │"
@@ -2451,11 +2451,11 @@ configure_rfw_rules() {
     if [[ "$mode_choice" == "1" ]]; then
         # 一键开启母鸡防火墙规则
         # 1. 全局禁用: QUIC (Hysteria 2/TUIC 暴力强发抢占协议)、MTProto (Telegram代理防封IP)、Email (SMTP 垃圾邮件)
-        # 2. 针对大陆屏蔽: HTTP, SOCKS5, FET-Strict (Shadowsocks/全加密), WireGuard (海外正常放行)
+        # 2. 针对大陆屏蔽: HTTP, SOCKS5, FET-Strict (Shadowsocks/全加密), WireGuard, Trojan (TLS代理直连) (海外正常放行)
         # 3. 网卡兼容: 默认开启 SKB 模式 (--xdp-mode skb)，100% 兼容各类 KVM/虚拟网卡/物理网卡，杜绝 os error 95 报错
         RFW_ARGS=" --xdp-mode skb --countries CN --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --block-quic"
-        RFW_SUMMARY_RULES="母鸡全量防护 (全局禁用HY2/TUIC/MTProto/Email + 针对大陆屏蔽SS/SOCKS5/HTTP/WG)"
-        RFW_SUMMARY_GEO="HY2/TUIC/MTProto/Email 全局封禁 | SS/SOCKS5/HTTP/WG 仅限制大陆"
+        RFW_SUMMARY_RULES="母鸡全量防护 (全局禁用HY2/TUIC/MTProto/Email + 针对大陆屏蔽SS/SOCKS5/HTTP/WG/Trojan)"
+        RFW_SUMMARY_GEO="HY2/TUIC/MTProto/Email 全局封禁 | SS/SOCKS5/HTTP/WG/Trojan 仅限制大陆"
         RFW_SUMMARY_LOG="关闭"
     else
         # 1. 协议屏蔽多选
@@ -2612,6 +2612,19 @@ install_rfw() {
         if [[ ! "${reinstall:-}" =~ ^[yY]$ ]]; then
             info "已取消"
             return 0
+        fi
+    fi
+
+    # 依赖检查与安装 (ipset / iptables)
+    if ! command -v ipset >/dev/null 2>&1; then
+        info "正在安装 ipset 组件..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq 2>/dev/null || true
+            apt-get install -y -qq ipset >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y ipset >/dev/null 2>&1 || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y ipset >/dev/null 2>&1 || true
         fi
     fi
 
@@ -2822,8 +2835,10 @@ install_rfw() {
     if [[ "$RFW_ARGS" =~ "--block-quic" ]]; then
         cat > "${RFW_INSTALL_DIR}/quic-shield.sh" << 'QUIC_EOF'
 #!/bin/sh
-# Incudal - 全局阻断 HY2 / TUIC (QUIC 协议握手) 与 Telegram MTProto 代理
+# Incudal - 全局阻断 HY2 / TUIC (QUIC 协议握手) 与 Telegram MTProto 代理，针对大陆直连阻断 Trojan / TLS 代理
 action="${1:-start}"
+RFW_DIR="/root/rfw"
+CN_FILE="${RFW_DIR}/cn.txt"
 
 apply_v4() {
     # 阻断 QUIC-v1 / QUIC-v2 (HY2 / TUIC)
@@ -2846,6 +2861,14 @@ apply_v4() {
 
     iptables -C FORWARD -m string --string "tg://proxy?" --algo bm --to 1500 -j DROP 2>/dev/null || \
     iptables -I FORWARD 1 -m string --string "tg://proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-DeepLink" -j DROP 2>/dev/null || true
+
+    # 针对中国大陆 IP 来源入站至容器实例阻断 TLS Client Hello 握手 (屏蔽 Trojan / TLS 代理直连，放行海外)
+    if command -v ipset >/dev/null 2>&1 && [ -f "$CN_FILE" ]; then
+        ipset create rfw_cn hash:net maxelem 65536 -exist 2>/dev/null || true
+        grep '\.' "$CN_FILE" | sed 's/^/add rfw_cn /' | ipset restore 2>/dev/null || true
+        iptables -C FORWARD -p tcp -m set --match-set rfw_cn src -m u32 --u32 "0>>22&0x3C@12&0xF0>>2@0&0xFFFF0000=0x16030000 && 0>>22&0x3C@12&0xF0>>2@4&0x00FF0000=0x00010000" -j DROP 2>/dev/null || \
+        iptables -I FORWARD 1 -p tcp -m set --match-set rfw_cn src -m u32 --u32 "0>>22&0x3C@12&0xF0>>2@0&0xFFFF0000=0x16030000 && 0>>22&0x3C@12&0xF0>>2@4&0x00FF0000=0x00010000" -m comment --comment "Block-CN-TLS-Trojan" -j DROP 2>/dev/null || true
+    fi
 }
 
 clean_v4() {
@@ -2855,6 +2878,8 @@ clean_v4() {
     iptables -D FORWARD -p tcp -m u32 --u32 "0>>22&0x3C@0=0xdddddddd" -m comment --comment "Block-MTProto-Padded" -j REJECT --reject-with tcp-reset 2>/dev/null || true
     iptables -D FORWARD -m string --string "t.me/proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-Link" -j DROP 2>/dev/null || true
     iptables -D FORWARD -m string --string "tg://proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-DeepLink" -j DROP 2>/dev/null || true
+    iptables -D FORWARD -p tcp -m set --match-set rfw_cn src -m u32 --u32 "0>>22&0x3C@12&0xF0>>2@0&0xFFFF0000=0x16030000 && 0>>22&0x3C@12&0xF0>>2@4&0x00FF0000=0x00010000" -m comment --comment "Block-CN-TLS-Trojan" -j DROP 2>/dev/null || true
+    ipset destroy rfw_cn 2>/dev/null || true
 }
 
 apply_v6() {
@@ -2869,6 +2894,13 @@ apply_v6() {
 
     ip6tables -C FORWARD -m string --string "tg://proxy?" --algo bm --to 1500 -j DROP 2>/dev/null || \
     ip6tables -I FORWARD 1 -m string --string "tg://proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-DeepLink-v6" -j DROP 2>/dev/null || true
+
+    if command -v ipset >/dev/null 2>&1 && [ -f "$CN_FILE" ]; then
+        ipset create rfw_cn6 hash:net family inet6 maxelem 65536 -exist 2>/dev/null || true
+        grep ':' "$CN_FILE" | sed 's/^/add rfw_cn6 /' | ipset restore 2>/dev/null || true
+        ip6tables -C FORWARD -p tcp -m set --match-set rfw_cn6 src -m u32 --u32 "40@12&0xF0>>2@0&0xFFFF0000=0x16030000 && 40@12&0xF0>>2@4&0x00FF0000=0x00010000" -j DROP 2>/dev/null || \
+        ip6tables -I FORWARD 1 -p tcp -m set --match-set rfw_cn6 src -m u32 --u32 "40@12&0xF0>>2@0&0xFFFF0000=0x16030000 && 40@12&0xF0>>2@4&0x00FF0000=0x00010000" -m comment --comment "Block-CN-TLS-Trojan-v6" -j DROP 2>/dev/null || true
+    fi
 }
 
 clean_v6() {
@@ -2876,6 +2908,8 @@ clean_v6() {
     ip6tables -D FORWARD -p udp -m u32 --u32 "48&0x80000000=0x80000000 && 49=0x6b3343cf" -m comment --comment "Block-QUIC-v2-HY2-TUIC-v6" -j DROP 2>/dev/null || true
     ip6tables -D FORWARD -m string --string "t.me/proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-Link-v6" -j DROP 2>/dev/null || true
     ip6tables -D FORWARD -m string --string "tg://proxy?" --algo bm --to 1500 -m comment --comment "Block-MTProto-DeepLink-v6" -j DROP 2>/dev/null || true
+    ip6tables -D FORWARD -p tcp -m set --match-set rfw_cn6 src -m u32 --u32 "40@12&0xF0>>2@0&0xFFFF0000=0x16030000 && 40@12&0xF0>>2@4&0x00FF0000=0x00010000" -m comment --comment "Block-CN-TLS-Trojan-v6" -j DROP 2>/dev/null || true
+    ipset destroy rfw_cn6 2>/dev/null || true
 }
 
 case "$action" in
