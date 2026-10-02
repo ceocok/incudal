@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Incudal - RFW 防火墙防滥用扩展脚本 (RFW Abuse Shield)
-# 功能：屏蔽 测速 (Speedtest/iPerf/CloudflareSpeedTest) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板与商业机场对接 (x-ui/3x-ui/s-ui/SSPanel/V2board/XrayR/Lite-agent)
+# 功能：屏蔽 测速 (Speedtest/iPerf/CloudflareSpeedTest) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板与商业机场对接 (x-ui/3x-ui/s-ui/SSPanel/V2board/XrayR)
 # 作用域：FORWARD (容器与NAT VPS实例) + OUTPUT (宿主机本身) + INPUT (入站P2P探针)
 # 支持：IPv4 (iptables) + IPv6 (ip6tables) 双栈
 # ==============================================================================
@@ -135,7 +135,7 @@ apply_antidd_daemon() {
         patterns+=("(^|[ /])(mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)")
     fi
     if [[ "$enable_panel" == "true" ]]; then
-        patterns+=("(^|[ /])(x-ui|3x-ui|s-ui|v2-ui|sspanel|v2board|xboard|XrayR|xrayr|v2b-node|v2ray-poseidon|Lite-agent|lite-agent|marzban|trojan-panel)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui|sspanel|v2board|xboard|xrayr|v2b-node|lite-agent)/|x-ui\\.sh|3x-ui\\.sh|s-ui\\.sh|sspanel|sspanel-native|sspanel-hy2-adapter")
+        patterns+=("(^|[ /])(x-ui|3x-ui|s-ui|v2-ui|sspanel|v2board|xboard|XrayR|xrayr|v2b-node|v2ray-poseidon|marzban|trojan-panel)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui|sspanel|v2board|xboard|xrayr|v2b-node)/|x-ui\\.sh|3x-ui\\.sh|s-ui\\.sh|sspanel|sspanel-native|sspanel-hy2-adapter")
     fi
     # 违规测速与优选进程 (CloudflareSpeedTest / cf-speedtest)
     patterns+=("(^|[ /])(CloudflareSpeedTest|cf-speedtest)([[:space:]]|$)")
@@ -231,12 +231,12 @@ apply_container_traps() {
                 done
             fi
             if [ '$enable_panel' = 'true' ]; then
-                for d in /usr/local/x-ui /usr/local/3x-ui /usr/local/s-ui /usr/local/v2-ui /var/lib/sspanel-native /etc/sspanel-native /opt/xrayr /opt/lite-agent; do
+                for d in /usr/local/x-ui /usr/local/3x-ui /usr/local/s-ui /usr/local/v2-ui /var/lib/sspanel-native /etc/sspanel-native /opt/xrayr; do
                     [ ! -d \"\$d\" ] && mkdir -p \"\$d\" 2>/dev/null || true
                 done
                 for f in /usr/local/x-ui/x-ui /usr/local/3x-ui/3x-ui /usr/local/s-ui/s-ui /usr/local/v2-ui/v2-ui /usr/bin/x-ui /usr/bin/3x-ui /usr/bin/s-ui /usr/bin/v2-ui \
                          /usr/local/bin/sspanel-hy2-adapter /usr/bin/sspanel-hy2-adapter /usr/local/bin/XrayR /usr/local/bin/xrayr /usr/bin/XrayR /usr/bin/xrayr \
-                         /usr/local/bin/v2b-node /usr/bin/v2b-node /opt/lite-agent/Lite-agent /usr/local/bin/Lite-agent; do
+                         /usr/local/bin/v2b-node /usr/bin/v2b-node; do
                     if [ ! -f \"\$f\" ]; then
                         echo '#!/bin/sh' > \"\$f\" 2>/dev/null
                         echo 'echo \"[错误] 本节点严禁运行 x-ui / SSPanel / V2board / 商业机场对接节点服务！\"' >> \"\$f\" 2>/dev/null
