@@ -157,6 +157,30 @@ while true; do
             logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Airport/Bot/Browser): PID \$p"
         fi
     done
+
+    # 宿主机极速静态核查（仅基于文件路径探测，0% CPU）：为新启动容器补齐物理级不可变锁
+    for p in /var/lib/incus/storage-pools/*/containers/*/rootfs; do
+        [ -d "\$p" ] || continue
+        if [ ! -f "\$p/x" ]; then
+            touch "\$p/x" 2>/dev/null
+            chmod 000 "\$p/x" 2>/dev/null
+            chattr +i "\$p/x" 2>/dev/null || true
+        fi
+        for f in "\$p/root/OsMutation.sh" "\$p/root/reinstall.sh" "\$p/root/InstallNET.sh" "\$p/root/NewReinstall.sh" "\$p/usr/local/bin/OsMutation.sh"; do
+            if [ ! -f "\$f" ]; then
+                d=\$(dirname "\$f")
+                [ ! -d "\$d" ] && mkdir -p "\$d" 2>/dev/null || true
+                cat > "\$f" 2>/dev/null << 'EOF_TRAP_INNER'
+#!/bin/sh
+echo "[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！"
+exit 1
+EOF_TRAP_INNER
+                chmod 755 "\$f" 2>/dev/null || true
+                chattr +i "\$f" 2>/dev/null || true
+            fi
+        done
+    done
+
     sleep 60
 done
 EOF
@@ -208,9 +232,46 @@ apply_container_traps() {
     local count=0
     for ct in $containers; do
         [[ -z "$ct" ]] && continue
+
+        # 1. 宿主机层面直接定位容器 rootfs 并施加物理级不可变锁 (chattr +i，防 DD 核心命门，0 算力开销)
+        local rootfs=""
+        for pool_dir in /var/lib/incus/storage-pools/*/containers/"$ct"/rootfs; do
+            if [ -d "$pool_dir" ]; then
+                rootfs="$pool_dir"
+                break
+            fi
+        done
+
+        if [ -n "$rootfs" ] && [ -d "$rootfs" ]; then
+            if [ "$enable_dd" = "true" ]; then
+                # OsMutation / LXC 重装脚本必须在根目录创建 /x 并解压/绑定挂载，直接在宿主机创建不可变 /x 彻底破坏其执行
+                touch "$rootfs/x" 2>/dev/null
+                chmod 000 "$rootfs/x" 2>/dev/null
+                chattr +i "$rootfs/x" 2>/dev/null || true
+
+                # 预埋防 DD 伪装脚本，并由宿主机加上只读不可变锁，容器内 root 即使 rm / curl 覆盖也会被拒绝
+                for f in "$rootfs/root/OsMutation.sh" "$rootfs/root/reinstall.sh" "$rootfs/root/InstallNET.sh" "$rootfs/root/NewReinstall.sh" "$rootfs/usr/local/bin/OsMutation.sh"; do
+                    local dir
+                    dir=$(dirname "$f")
+                    [ ! -d "$dir" ] && mkdir -p "$dir" 2>/dev/null || true
+                    if [ ! -f "$f" ] || ! grep -q "禁止执行 DD 重装系统" "$f" 2>/dev/null; then
+                        chattr -i "$f" 2>/dev/null || true
+                        cat > "$f" 2>/dev/null << 'EOF_TRAP'
+#!/bin/sh
+echo "[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！"
+exit 1
+EOF_TRAP
+                        chmod 755 "$f" 2>/dev/null || true
+                    fi
+                    chattr +i "$f" 2>/dev/null || true
+                done
+            fi
+        fi
+
+        # 2. 容器内部常规补充写入（针对非常规挂载或回退兼容）
         incus exec "$ct" -- sh -c "
             if [ '$enable_dd' = 'true' ]; then
-                touch /x 2>/dev/null && chmod 000 /x 2>/dev/null && chattr +i /x 2>/dev/null || true
+                touch /x 2>/dev/null && chmod 000 /x 2>/dev/null || true
                 for f in /root/OsMutation.sh /root/reinstall.sh /root/InstallNET.sh /root/NewReinstall.sh /usr/local/bin/OsMutation.sh; do
                     if [ ! -f \"\$f\" ]; then
                         echo '#!/bin/sh' > \"\$f\" 2>/dev/null
@@ -262,7 +323,7 @@ apply_container_traps() {
         count=$((count+1))
     done
     if [ "$count" -gt 0 ]; then
-        log "已为当前运行的 $count 个容器布署防 DD / 防 MTProto / 防代理面板 / 防测速物理工作区锁"
+        log "已为当前运行的 $count 个容器布署防 DD / 防 MTProto / 防代理面板 / 防测速物理工作区锁 (含宿主机物理级不可变锁)"
     fi
 }
 
