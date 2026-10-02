@@ -3084,11 +3084,11 @@ do_rfw_cleanup() {
     log "RFW 防火墙已卸载"
 }
 
-# ========================== RFW 防滥用管理 (测速/挖矿/BT/DD/MTProto/代理面板) ==========================
+# ========================== RFW 防滥用管理 (测速/挖矿/BT/DD/MTProto/代理面板/商业机场对接) ==========================
 manage_rfw_abuse() {
     echo ""
     divider
-    echo -e "  ${BOLD}RFW 防滥用防火墙 (屏蔽测速/挖矿/BT/DD/MTProto/代理面板)${NC}"
+    echo -e "  ${BOLD}RFW 防滥用防火墙 (屏蔽测速/挖矿/BT/DD/MTProto/代理面板/SSPanel商业机场对接)${NC}"
     divider
     echo ""
 

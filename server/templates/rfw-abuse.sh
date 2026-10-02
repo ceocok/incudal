@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Incudal - RFW 防火墙防滥用扩展脚本 (RFW Abuse Shield)
-# 功能：屏蔽 测速 (Speedtest/iPerf/CloudflareSpeedTest) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板 (x-ui/3x-ui/s-ui)
+# 功能：屏蔽 测速 (Speedtest/iPerf/CloudflareSpeedTest) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板与商业机场对接 (x-ui/3x-ui/s-ui/SSPanel/V2board/XrayR/Lite-agent)
 # 作用域：FORWARD (容器与NAT VPS实例) + OUTPUT (宿主机本身) + INPUT (入站P2P探针)
 # 支持：IPv4 (iptables) + IPv6 (ip6tables) 双栈
 # ==============================================================================
 
 set -e
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 INSTALL_PATH="/usr/local/bin/rfw-abuse"
 SERVICE_PATH="/etc/systemd/system/rfw-abuse.service"
 
@@ -135,7 +135,7 @@ apply_antidd_daemon() {
         patterns+=("(^|[ /])(mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)")
     fi
     if [[ "$enable_panel" == "true" ]]; then
-        patterns+=("(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\\.sh|3x-ui\\.sh|s-ui\\.sh")
+        patterns+=("(^|[ /])(x-ui|3x-ui|s-ui|v2-ui|sspanel|v2board|xboard|XrayR|xrayr|v2b-node|v2ray-poseidon|Lite-agent|lite-agent|marzban|trojan-panel)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui|sspanel|v2board|xboard|xrayr|v2b-node|lite-agent)/|x-ui\\.sh|3x-ui\\.sh|s-ui\\.sh|sspanel|sspanel-native|sspanel-hy2-adapter")
     fi
     # 违规测速与优选进程 (CloudflareSpeedTest / cf-speedtest)
     patterns+=("(^|[ /])(CloudflareSpeedTest|cf-speedtest)([[:space:]]|$)")
@@ -147,14 +147,14 @@ apply_antidd_daemon() {
 
     cat > /usr/local/bin/rfw-antidd-daemon << EOF
 #!/usr/bin/env bash
-# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels & Bot/Browser)
+# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels/Airport & Bot/Browser)
 PATTERN="${combined_pattern}"
 while true; do
     # 扫描属于容器命名空间的进程 (UID >= 1000000 属于 Incus 映射的用户命名空间)
     pids=\$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="\$PATTERN" '\$1 >= 1000000 && \$0 ~ pat && \$0 !~ /rfw-antidd/ {print \$2}')
     for p in \$pids; do
         if kill -9 "\$p" 2>/dev/null; then
-            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Bot/Browser): PID \$p"
+            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Airport/Bot/Browser): PID \$p"
         fi
     done
     sleep 60
@@ -169,7 +169,7 @@ EOF
 
     cat > /etc/systemd/system/rfw-antidd.service << 'EOF'
 [Unit]
-Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto & ProxyPanels)
+Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels & Airport Nodes)
 After=incus.service
 
 [Service]
@@ -183,7 +183,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable --now rfw-antidd.service >/dev/null 2>&1 || true
-    log "已启动宿主机反滥用违规进程 (DD/MTProto/代理面板) 秒级巡检守护服务 (rfw-antidd)"
+    log "已启动宿主机反滥用违规进程 (DD/MTProto/代理面板/商业机场对接) 巡检守护服务 (rfw-antidd)"
 }
 
 stop_antidd_daemon() {
@@ -196,7 +196,7 @@ stop_antidd_daemon() {
     systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
-# 容器内文件锁：破坏 OsMutation、MTProto、x-ui/3x-ui/s-ui 面板与 CloudflareSpeedTest 的安装与执行工作流
+# 容器内文件锁：破坏 OsMutation、MTProto、x-ui/3x-ui/s-ui 面板、SSPanel/V2board 机场对接与 CloudflareSpeedTest 的安装与执行工作流
 apply_container_traps() {
     local enable_dd="${1:-true}"
     local enable_mt="${2:-true}"
@@ -231,13 +231,15 @@ apply_container_traps() {
                 done
             fi
             if [ '$enable_panel' = 'true' ]; then
-                for d in /usr/local/x-ui /usr/local/3x-ui /usr/local/s-ui /usr/local/v2-ui; do
+                for d in /usr/local/x-ui /usr/local/3x-ui /usr/local/s-ui /usr/local/v2-ui /var/lib/sspanel-native /etc/sspanel-native /opt/xrayr /opt/lite-agent; do
                     [ ! -d \"\$d\" ] && mkdir -p \"\$d\" 2>/dev/null || true
                 done
-                for f in /usr/local/x-ui/x-ui /usr/local/3x-ui/3x-ui /usr/local/s-ui/s-ui /usr/local/v2-ui/v2-ui /usr/bin/x-ui /usr/bin/3x-ui /usr/bin/s-ui /usr/bin/v2-ui; do
+                for f in /usr/local/x-ui/x-ui /usr/local/3x-ui/3x-ui /usr/local/s-ui/s-ui /usr/local/v2-ui/v2-ui /usr/bin/x-ui /usr/bin/3x-ui /usr/bin/s-ui /usr/bin/v2-ui \
+                         /usr/local/bin/sspanel-hy2-adapter /usr/bin/sspanel-hy2-adapter /usr/local/bin/XrayR /usr/local/bin/xrayr /usr/bin/XrayR /usr/bin/xrayr \
+                         /usr/local/bin/v2b-node /usr/bin/v2b-node /opt/lite-agent/Lite-agent /usr/local/bin/Lite-agent; do
                     if [ ! -f \"\$f\" ]; then
                         echo '#!/bin/sh' > \"\$f\" 2>/dev/null
-                        echo 'echo \"[错误] 本节点严禁运行 x-ui / 3x-ui / s-ui 等代理面板服务！\"' >> \"\$f\" 2>/dev/null
+                        echo 'echo \"[错误] 本节点严禁运行 x-ui / SSPanel / V2board / 商业机场对接节点服务！\"' >> \"\$f\" 2>/dev/null
                         echo 'exit 1' >> \"\$f\" 2>/dev/null
                         chmod 755 \"\$f\" 2>/dev/null || true
                     fi
