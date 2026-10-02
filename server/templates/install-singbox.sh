@@ -4,11 +4,10 @@ set -euo pipefail
 # ==============================================================================
 # Incudal Sing-box NAT/VPS 一键安装脚本
 # 特性:
-#   1. 仅保留安全可靠的 TCP 协议 (VLESS Reality / Trojan Fallback / VMess / Shadowsocks 2022 / AnyTLS Reality)
-#   2. 内置 BusyBox httpd 超轻量 Web 伪装回落 (抗 GFW 主动嗅探/异常断开特征探测)
-#   3. 彻底禁用 HY2/TUIC 等易受 GFW 阻断及防火墙限制的 UDP/QUIC 协议
-#   4. 内置丰富的优质 SNI 伪装域名池，默认随机选取，防止节点伪装单一
-#   5. 适配 Alpine (OpenRC) 与 Debian/Ubuntu/CentOS (Systemd)
+#   1. 仅保留安全可靠的 TCP 协议 (VLESS Reality / VMess / Shadowsocks 2022 / AnyTLS Reality)
+#   2. 彻底禁用 HY2/TUIC 等易受 GFW 阻断及防火墙限制的 UDP/QUIC 协议
+#   3. 内置丰富的优质 SNI 伪装域名池，默认随机选取，防止节点伪装单一
+#   4. 适配 Alpine (OpenRC) 与 Debian/Ubuntu/CentOS (Systemd)
 # ==============================================================================
 
 # -----------------------
@@ -63,7 +62,7 @@ install_deps() {
     case "$OS" in
         alpine)
             apk update || { err "apk update 失败"; exit 1; }
-            apk add --no-cache bash curl ca-certificates openssl openrc jq busybox-extras || {
+            apk add --no-cache bash curl ca-certificates openssl openrc jq || {
                 err "依赖安装失败"
                 exit 1
             }
@@ -71,13 +70,13 @@ install_deps() {
         debian)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y || { err "apt update 失败"; exit 1; }
-            apt-get install -y curl ca-certificates openssl jq busybox || {
+            apt-get install -y curl ca-certificates openssl jq || {
                 err "依赖安装失败"
                 exit 1
             }
             ;;
         redhat)
-            yum install -y curl ca-certificates openssl jq busybox || {
+            yum install -y curl ca-certificates openssl jq || {
                 err "依赖安装失败"
                 exit 1
             }
@@ -174,115 +173,6 @@ SNI_POOL=(
 RANDOM_DEFAULT_SNI="${SNI_POOL[$((RANDOM % ${#SNI_POOL[@]}))]}"
 
 # -----------------------
-# 配置 BusyBox 伪装 Web 站点 (用于抗 GFW 主动嗅探/回落)
-setup_fake_web() {
-    info "配置 BusyBox httpd 伪装 Web 服务 (回落后端 127.0.0.1:8080)..."
-    local web_dir="/var/www/fake-site"
-    mkdir -p "$web_dir"
-    
-    if [ ! -f "$web_dir/index.html" ]; then
-        cat > "$web_dir/index.html" <<'EOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Enterprise Edge Service Gateway</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .card { background: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1); border: 1px solid #e2e8f0; padding: 40px; max-width: 520px; width: 90%; }
-        .badge { display: inline-flex; align-items: center; background-color: #ecfdf5; color: #059669; font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 9999px; margin-bottom: 16px; }
-        .badge-dot { width: 8px; height: 8px; background-color: #10b981; border-radius: 50%; margin-right: 6px; }
-        h1 { font-size: 22px; font-weight: 700; margin: 0 0 12px 0; color: #0f172a; }
-        p { font-size: 14px; line-height: 1.6; color: #64748b; margin: 0 0 24px 0; }
-        .grid { border-top: 1px solid #f1f5f9; padding-top: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-        .item-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
-        .item-value { font-size: 14px; font-weight: 600; color: #334155; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="badge"><span class="badge-dot"></span>Service Active</div>
-        <h1>Edge Application Gateway</h1>
-        <p>This endpoint is managed by the network automation cluster. Secure ingress routing and health telemetry are operating normally.</p>
-        <div class="grid">
-            <div>
-                <div class="item-label">Status</div>
-                <div class="item-value">200 Operational</div>
-            </div>
-            <div>
-                <div class="item-label">Protocol</div>
-                <div class="item-value">HTTP/1.1 TLS</div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-EOF
-    fi
-
-    # 创建启动脚本
-    cat > /usr/local/bin/fake-web-server <<'EOF'
-#!/bin/sh
-WEB_DIR="/var/www/fake-site"
-mkdir -p "$WEB_DIR"
-if [ -x /usr/sbin/httpd ]; then
-    exec /usr/sbin/httpd -f -p 127.0.0.1:8080 -h "$WEB_DIR"
-elif command -v busybox >/dev/null 2>&1; then
-    exec busybox httpd -f -p 127.0.0.1:8080 -h "$WEB_DIR"
-elif command -v busybox-extras >/dev/null 2>&1; then
-    exec busybox-extras httpd -f -p 127.0.0.1:8080 -h "$WEB_DIR"
-else
-    exec httpd -f -p 127.0.0.1:8080 -h "$WEB_DIR"
-fi
-EOF
-    chmod +x /usr/local/bin/fake-web-server
-
-    # 安装系统服务
-    if [ "$OS" = "alpine" ]; then
-        cat > /etc/init.d/fake-web <<'OPENRC'
-#!/sbin/openrc-run
-name="fake-web"
-description="BusyBox httpd Fallback Web Server"
-command="/usr/local/bin/fake-web-server"
-command_background="yes"
-pidfile="/run/fake-web.pid"
-
-depend() {
-    need net
-}
-
-start_pre() {
-    checkpath --directory --mode 0755 /run
-}
-OPENRC
-        chmod +x /etc/init.d/fake-web
-        rc-update add fake-web default >/dev/null 2>&1 || true
-        rc-service fake-web restart >/dev/null 2>&1 || rc-service fake-web start >/dev/null 2>&1 || true
-    else
-        cat > /etc/systemd/system/fake-web.service <<'SYSTEMD'
-[Unit]
-Description=BusyBox httpd Fallback Web Server
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/fake-web-server
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-SYSTEMD
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl enable fake-web >/dev/null 2>&1 || true
-        systemctl restart fake-web >/dev/null 2>&1 || systemctl start fake-web >/dev/null 2>&1 || true
-    fi
-    info "BusyBox httpd 伪装 Web 服务已就绪 (127.0.0.1:8080)"
-}
-
-# -----------------------
 # 配置节点名称后缀
 echo "请输入节点名称(留空则默认节点名):"
 read -r user_name
@@ -301,7 +191,6 @@ select_protocols() {
     echo "2) VMess (TLS + WS)"
     echo "3) Shadowsocks (SS 2022 / AEAD)"
     echo "4) AnyTLS Reality"
-    echo "5) Trojan (TLS + BusyBox Web回落, 强抗主动嗅探)"
     echo ""
     echo "请输入要部署的协议编号(回车默认 1, 多个用空格分隔如: 1 2):"
     read -r protocol_input
@@ -311,7 +200,6 @@ select_protocols() {
     ENABLE_VMESS=false
     ENABLE_SS=false
     ENABLE_ANYTLS=false
-    ENABLE_TROJAN=false
     
     for num in $protocol_input; do
         case "$num" in
@@ -319,12 +207,11 @@ select_protocols() {
             2) ENABLE_VMESS=true ;;
             3) ENABLE_SS=true ;;
             4) ENABLE_ANYTLS=true ;;
-            5) ENABLE_TROJAN=true ;;
             *) warn "无效选项: $num" ;;
         esac
     done
     
-    if ! $ENABLE_REALITY && ! $ENABLE_VMESS && ! $ENABLE_SS && ! $ENABLE_ANYTLS && ! $ENABLE_TROJAN; then
+    if ! $ENABLE_REALITY && ! $ENABLE_VMESS && ! $ENABLE_SS && ! $ENABLE_ANYTLS; then
         err "未选择任何协议,退出安装"
         exit 1
     fi
@@ -336,7 +223,6 @@ ENABLE_REALITY=$ENABLE_REALITY
 ENABLE_VMESS=$ENABLE_VMESS
 ENABLE_SS=$ENABLE_SS
 ENABLE_ANYTLS=$ENABLE_ANYTLS
-ENABLE_TROJAN=$ENABLE_TROJAN
 EOF
     
     info "已选择协议:"
@@ -344,13 +230,11 @@ EOF
     $ENABLE_VMESS && echo "  - VMess (TLS + WS)"
     $ENABLE_SS && echo "  - Shadowsocks"
     $ENABLE_ANYTLS && echo "  - AnyTLS Reality"
-    $ENABLE_TROJAN && echo "  - Trojan (TLS + BusyBox Web回落)"
     
     export ENABLE_REALITY
     export ENABLE_VMESS
     export ENABLE_SS
     export ENABLE_ANYTLS
-    export ENABLE_TROJAN
 }
 
 # 创建配置目录并选择协议
@@ -423,28 +307,11 @@ if $ENABLE_VMESS; then
     VMESS_SNI="$(echo "$VMESS_SNI" | tr -d '[:space:]')"
 fi
 
-# 如果选择了 Trojan 协议，询问 Trojan TLS SNI 伪装域名
-TROJAN_SNI=""
-if $ENABLE_TROJAN; then
-    echo ""
-    if [ -n "$CUSTOM_IP" ] && ! [[ "$CUSTOM_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        DEFAULT_TROJAN_SNI="$CUSTOM_IP"
-    else
-        DEFAULT_TROJAN_SNI="${REALITY_SNI:-$RANDOM_DEFAULT_SNI}"
-    fi
-    info "Trojan TLS 推荐 SNI: \033[1;32m${DEFAULT_TROJAN_SNI}\033[0m"
-    echo "请输入 Trojan TLS SNI 伪装域名 (留空直接回车使用推荐: ${DEFAULT_TROJAN_SNI}):"
-    read -r USER_TROJAN_SNI
-    TROJAN_SNI="${USER_TROJAN_SNI:-$DEFAULT_TROJAN_SNI}"
-    TROJAN_SNI="$(echo "$TROJAN_SNI" | tr -d '[:space:]')"
-fi
-
 # 将用户选择写入缓存
 mkdir -p /etc/sing-box
 echo "CUSTOM_IP=$CUSTOM_IP" > /etc/sing-box/.config_cache.tmp || true
 echo "REALITY_SNI=$REALITY_SNI" >> /etc/sing-box/.config_cache.tmp || true
 echo "VMESS_SNI=$VMESS_SNI" >> /etc/sing-box/.config_cache.tmp || true
-echo "TROJAN_SNI=$TROJAN_SNI" >> /etc/sing-box/.config_cache.tmp || true
 if [ -f /etc/sing-box/.config_cache ]; then
     awk 'FNR==NR{a[$1]=1;next} {split($0,k,"="); if(!(k[1] in a)) print $0}' /etc/sing-box/.config_cache.tmp /etc/sing-box/.config_cache >> /etc/sing-box/.config_cache.tmp2 || true
     mv /etc/sing-box/.config_cache.tmp2 /etc/sing-box/.config_cache.tmp || true
@@ -516,19 +383,6 @@ get_config() {
         info "AnyTLS Reality 端口: $PORT_ANYTLS"
         info "AnyTLS Reality 用户名: $ANYTLS_USER"
         info "AnyTLS Reality 密码已自动生成"
-    fi
-
-    if $ENABLE_TROJAN; then
-        info "=== 配置 Trojan (TLS + BusyBox Web回落) ==="
-        if [ -n "${SINGBOX_PORT_TROJAN:-}" ]; then
-            PORT_TROJAN="$SINGBOX_PORT_TROJAN"
-        else
-            read -p "请输入 Trojan 端口 (留空则随机 10000-60000): " USER_PORT_TROJAN
-            PORT_TROJAN="${USER_PORT_TROJAN:-$(rand_port)}"
-        fi
-        TROJAN_PASS=$(rand_pass)
-        info "Trojan 端口: $PORT_TROJAN"
-        info "Trojan 密码已自动生成"
     fi
 
     info "配置完成，继续安装..."
@@ -709,40 +563,35 @@ generate_reality_keys() {
 generate_reality_keys
 
 # -----------------------
-# 生成 TLS 证书 (用于 VMess / Trojan)
-generate_tls_cert() {
-    if ! $ENABLE_VMESS && ! $ENABLE_TROJAN; then
+# 生成 VMess TLS 证书
+generate_vmess_cert() {
+    if ! $ENABLE_VMESS; then
         return 0
     fi
-    info "配置 TLS 证书..."
+    info "配置 VMess TLS 证书..."
     mkdir -p /etc/sing-box
     local cert_file="/etc/sing-box/vmess.crt"
     local key_file="/etc/sing-box/vmess.key"
-    local cert_sni="${TROJAN_SNI:-${VMESS_SNI:-$RANDOM_DEFAULT_SNI}}"
     
     if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$key_file" \
             -out "$cert_file" \
             -days 3650 \
-            -subj "/CN=${cert_sni}" >/dev/null 2>&1 || {
+            -subj "/CN=${VMESS_SNI}" >/dev/null 2>&1 || {
             openssl req -x509 -newkey rsa:2048 -nodes \
                 -keyout "$key_file" \
                 -out "$cert_file" \
                 -days 3650 \
-                -subj "/CN=${cert_sni}" >/dev/null 2>&1
+                -subj "/CN=${VMESS_SNI}" >/dev/null 2>&1
         }
-        info "已自动生成 TLS 自签名证书 (有效期 10 年, 域名: ${cert_sni})"
+        info "已自动生成 VMess TLS 自签名证书 (有效期 10 年, 域名: ${VMESS_SNI})"
     else
-        info "使用已有 TLS 证书: $cert_file"
-    fi
-
-    if $ENABLE_TROJAN; then
-        setup_fake_web
+        info "使用已有 VMess 证书: $cert_file"
     fi
 }
 
-generate_tls_cert
+generate_vmess_cert
 
 # -----------------------
 # 生成配置文件
@@ -889,38 +738,6 @@ INBOUND_ANYTLS
         need_comma=true
     fi
 
-    if $ENABLE_TROJAN; then
-        $need_comma && echo "," >> "$TEMP_INBOUNDS"
-        cat >> "$TEMP_INBOUNDS" <<'INBOUND_TROJAN'
-    {
-      "type": "trojan",
-      "tag": "trojan-in",
-      "listen": "::",
-      "listen_port": PORT_TROJAN_PLACEHOLDER,
-      "users": [
-        {
-          "name": "default",
-          "password": "PASS_TROJAN_PLACEHOLDER"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "SNI_TROJAN_PLACEHOLDER",
-        "certificate_path": "/etc/sing-box/vmess.crt",
-        "key_path": "/etc/sing-box/vmess.key"
-      },
-      "fallback": {
-        "server": "127.0.0.1",
-        "server_port": 8080
-      }
-    }
-INBOUND_TROJAN
-        sed -i "s|PORT_TROJAN_PLACEHOLDER|$PORT_TROJAN|g" "$TEMP_INBOUNDS"
-        sed -i "s|PASS_TROJAN_PLACEHOLDER|$TROJAN_PASS|g" "$TEMP_INBOUNDS"
-        sed -i "s|SNI_TROJAN_PLACEHOLDER|$TROJAN_SNI|g" "$TEMP_INBOUNDS"
-        need_comma=true
-    fi
-
     # 生成最终配置
     cat > "$CONFIG_PATH" <<'CONFIG_HEAD'
 {
@@ -962,7 +779,6 @@ ENABLE_REALITY=$ENABLE_REALITY
 ENABLE_VMESS=$ENABLE_VMESS
 ENABLE_SS=$ENABLE_SS
 ENABLE_ANYTLS=$ENABLE_ANYTLS
-ENABLE_TROJAN=$ENABLE_TROJAN
 CACHEEOF
 
     $ENABLE_REALITY && cat >> /etc/sing-box/.config_cache <<CACHEEOF
@@ -991,12 +807,6 @@ CACHEEOF
 ANYTLS_PORT=$PORT_ANYTLS
 ANYTLS_USER=$ANYTLS_USER
 ANYTLS_PSK=$ANYTLS_PSK
-CACHEEOF
-
-    $ENABLE_TROJAN && cat >> /etc/sing-box/.config_cache <<CACHEEOF
-PORT_TROJAN=$PORT_TROJAN
-TROJAN_PASS=$TROJAN_PASS
-TROJAN_SNI=$TROJAN_SNI
 CACHEEOF
 
     # 写入 CUSTOM_IP
@@ -1172,14 +982,6 @@ generate_uris() {
         echo "anytls://${anytls_pass_encoded}@${host}:${PORT_ANYTLS}/?security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}#anytls${suffix}"
         echo ""
     fi
-
-    if $ENABLE_TROJAN; then
-        local trojan_pass_encoded
-        trojan_pass_encoded=$(printf "%s" "$TROJAN_PASS" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
-        echo "=== Trojan (TLS + BusyBox Web回落) ==="
-        echo "trojan://${trojan_pass_encoded}@${host}:${PORT_TROJAN}?security=tls&sni=${TROJAN_SNI}&allowInsecure=1#trojan${suffix}"
-        echo ""
-    fi
 }
 
 # -----------------------
@@ -1194,7 +996,6 @@ $ENABLE_REALITY && echo "   VLESS Reality 端口: $PORT_REALITY | UUID: $UUID"
 $ENABLE_VMESS && echo "   VMess (TLS+WS) 端口: $PORT_VMESS | UUID: $VMESS_UUID | WS 路径: $VMESS_PATH | SNI: $VMESS_SNI"
 $ENABLE_SS && echo "   SS 端口: $PORT_SS | 密码: $PSK_SS | 加密: $SS_METHOD"
 $ENABLE_ANYTLS && echo "   AnyTLS 端口: $PORT_ANYTLS | 用户: $ANYTLS_USER | 密码: $ANYTLS_PSK"
-$ENABLE_TROJAN && echo "   Trojan 端口: $PORT_TROJAN | 密码: $TROJAN_PASS | SNI: $TROJAN_SNI | Web回落: 127.0.0.1:8080"
 echo "   连接地址: $PUB_IP"
 echo "   Reality 伪装 SNI: ${REALITY_SNI}"
 echo ""
@@ -1267,38 +1068,16 @@ detect_os
 
 # 服务控制
 service_start() {
-    if [ -f /etc/init.d/fake-web ] && [ "$OS" = "alpine" ]; then
-        rc-service fake-web start >/dev/null 2>&1 || true
-    elif [ -f /etc/systemd/system/fake-web.service ]; then
-        systemctl start fake-web >/dev/null 2>&1 || true
-    fi
     [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" start || systemctl start "$SERVICE_NAME"
 }
 service_stop() {
-    if [ -f /etc/init.d/fake-web ] && [ "$OS" = "alpine" ]; then
-        rc-service fake-web stop >/dev/null 2>&1 || true
-    elif [ -f /etc/systemd/system/fake-web.service ]; then
-        systemctl stop fake-web >/dev/null 2>&1 || true
-    fi
     [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" stop || systemctl stop "$SERVICE_NAME"
 }
 service_restart() {
-    if [ -f /etc/init.d/fake-web ] && [ "$OS" = "alpine" ]; then
-        rc-service fake-web restart >/dev/null 2>&1 || rc-service fake-web start >/dev/null 2>&1 || true
-    elif [ -f /etc/systemd/system/fake-web.service ]; then
-        systemctl restart fake-web >/dev/null 2>&1 || systemctl start fake-web >/dev/null 2>&1 || true
-    fi
     [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" restart || systemctl restart "$SERVICE_NAME"
 }
 service_status() {
     [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" status || systemctl status "$SERVICE_NAME" --no-pager
-    if [ -f /etc/init.d/fake-web ] && [ "$OS" = "alpine" ]; then
-        echo "--- fake-web (BusyBox httpd) ---"
-        rc-service fake-web status || true
-    elif [ -f /etc/systemd/system/fake-web.service ]; then
-        echo "--- fake-web (BusyBox httpd) ---"
-        systemctl status fake-web --no-pager || true
-    fi
 }
 
 # 生成随机值
@@ -1334,7 +1113,6 @@ read_config() {
     ENABLE_VMESS="${ENABLE_VMESS:-false}"
     ENABLE_SS="${ENABLE_SS:-false}"
     ENABLE_ANYTLS="${ENABLE_ANYTLS:-false}"
-    ENABLE_TROJAN="${ENABLE_TROJAN:-false}"
     CUSTOM_IP="${CUSTOM_IP:-}"
 
     # 读取各协议配置
@@ -1375,13 +1153,6 @@ read_config() {
         ANYTLS_PORT=$(jq -r '.inbounds[] | select(.type=="anytls") | .listen_port // empty' "$CONFIG_PATH" | head -n1)
         ANYTLS_USER=$(jq -r '.inbounds[] | select(.type=="anytls") | .users[0].name // empty' "$CONFIG_PATH" | head -n1)
         ANYTLS_PSK=$(jq -r '.inbounds[] | select(.type=="anytls") | .users[0].password // empty' "$CONFIG_PATH" | head -n1)
-    fi
-
-    if [ "${ENABLE_TROJAN:-false}" = "true" ]; then
-        TROJAN_PORT=$(jq -r '.inbounds[] | select(.type=="trojan") | .listen_port // empty' "$CONFIG_PATH" | head -n1)
-        TROJAN_PASS=$(jq -r '.inbounds[] | select(.type=="trojan") | .users[0].password // empty' "$CONFIG_PATH" | head -n1)
-        TROJAN_SNI=$(jq -r '.inbounds[] | select(.type=="trojan") | .tls.server_name // empty' "$CONFIG_PATH" | head -n1)
-        TROJAN_SNI="${TROJAN_SNI:-$REALITY_SNI}"
     fi
 }
 
@@ -1441,13 +1212,6 @@ generate_uris() {
         anytls_pass_encoded=$(url_encode "$ANYTLS_PSK")
         echo "=== AnyTLS Reality ===" >> "$URI_FILE"
         echo "anytls://${anytls_pass_encoded}@${PUBLIC_IP}:${ANYTLS_PORT}/?security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}#anytls${node_suffix}" >> "$URI_FILE"
-        echo "" >> "$URI_FILE"
-    fi
-
-    if [ "${ENABLE_TROJAN:-false}" = "true" ]; then
-        trojan_pass_encoded=$(url_encode "$TROJAN_PASS")
-        echo "=== Trojan (TLS + BusyBox Web回落) ===" >> "$URI_FILE"
-        echo "trojan://${trojan_pass_encoded}@${PUBLIC_IP}:${TROJAN_PORT}?security=tls&sni=${TROJAN_SNI}&allowInsecure=1#trojan${node_suffix}" >> "$URI_FILE"
         echo "" >> "$URI_FILE"
     fi
 
@@ -1595,36 +1359,6 @@ action_reset_anytls() {
     generate_uris || warn "生成 URI 失败"
 }
 
-# 重置 Trojan 端口与密码
-action_reset_trojan() {
-    read_config || return 1
-    
-    if [ "${ENABLE_TROJAN:-false}" != "true" ]; then
-        err "Trojan 协议未启用"
-        return 1
-    fi
-    
-    read -p "输入新的 Trojan 端口(回车保持 $TROJAN_PORT): " new_port
-    new_port="${new_port:-$TROJAN_PORT}"
-
-    read -p "输入新的 Trojan 密码(回车保持原有密码): " new_pass
-    new_pass="${new_pass:-$TROJAN_PASS}"
-    
-    info "正在停止服务..."
-    service_stop || warn "停止服务失败"
-    
-    cp "$CONFIG_PATH" "${CONFIG_PATH}.bak"
-    
-    jq --argjson port "$new_port" --arg pass "$new_pass" '
-    .inbounds |= map(if .type=="trojan" then .listen_port = $port | .users[0].password = $pass else . end)
-    ' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-    
-    info "已启动服务并更新 Trojan 配置"
-    service_start || warn "启动服务失败"
-    sleep 1
-    generate_uris || warn "生成 URI 失败"
-}
-
 # 更新 sing-box
 action_update() {
     info "开始更新 sing-box..."
@@ -1650,23 +1384,17 @@ action_uninstall() {
     info "正在卸载..."
     service_stop || true
     if [ "$OS" = "alpine" ]; then
-        rc-service fake-web stop 2>/dev/null || true
-        rc-update del fake-web default 2>/dev/null || true
-        rm -f /etc/init.d/fake-web
         rc-update del sing-box default 2>/dev/null || true
         rm -f /etc/init.d/sing-box
         apk del sing-box 2>/dev/null || true
     else
-        systemctl stop fake-web 2>/dev/null || true
-        systemctl disable fake-web 2>/dev/null || true
-        rm -f /etc/systemd/system/fake-web.service
         systemctl stop sing-box 2>/dev/null || true
         systemctl disable sing-box 2>/dev/null || true
         rm -f /etc/systemd/system/sing-box.service
         systemctl daemon-reload 2>/dev/null || true
         apt purge -y sing-box >/dev/null 2>&1 || true
     fi
-    rm -rf /etc/sing-box /var/log/sing-box* /usr/local/bin/sb /usr/bin/sing-box /root/node_names.txt /var/www/fake-site /usr/local/bin/fake-web-server 2>/dev/null || true
+    rm -rf /etc/sing-box /var/log/sing-box* /usr/local/bin/sb /usr/bin/sing-box /root/node_names.txt 2>/dev/null || true
     info "卸载完成"
 }
 
@@ -1917,7 +1645,6 @@ action_reinstall_protocols() {
     echo "2) VMess (TLS + WS)"
     echo "3) Shadowsocks (SS 2022 / AEAD)"
     echo "4) AnyTLS Reality"
-    echo "5) Trojan (TLS + BusyBox Web回落, 强抗主动嗅探)"
     echo ""
     read -p "请输入要部署的协议编号(回车默认 1, 多个用空格分隔如: 1 2): " protocol_input
     protocol_input="${protocol_input:-1}"
@@ -1926,7 +1653,6 @@ action_reinstall_protocols() {
     local NEW_ENABLE_VMESS=false
     local NEW_ENABLE_SS=false
     local NEW_ENABLE_ANYTLS=false
-    local NEW_ENABLE_TROJAN=false
 
     for num in $protocol_input; do
         case "$num" in
@@ -1934,12 +1660,11 @@ action_reinstall_protocols() {
             2) NEW_ENABLE_VMESS=true ;;
             3) NEW_ENABLE_SS=true ;;
             4) NEW_ENABLE_ANYTLS=true ;;
-            5) NEW_ENABLE_TROJAN=true ;;
             *) warn "无效选项: $num" ;;
         esac
     done
 
-    if ! $NEW_ENABLE_REALITY && ! $NEW_ENABLE_VMESS && ! $NEW_ENABLE_SS && ! $NEW_ENABLE_ANYTLS && ! $NEW_ENABLE_TROJAN; then
+    if ! $NEW_ENABLE_REALITY && ! $NEW_ENABLE_VMESS && ! $NEW_ENABLE_SS && ! $NEW_ENABLE_ANYTLS; then
         err "未选择任何有效协议，取消操作"
         return 1
     fi
@@ -2033,6 +1758,17 @@ action_reinstall_protocols() {
         info "VMess 端口: $NEW_PORT_VMESS | WS 路径: $NEW_VMESS_PATH | SNI: $NEW_VMESS_SNI"
         info "VMess UUID 已自动生成"
 
+        # 生成证书
+        mkdir -p /etc/sing-box
+        if [ ! -f /etc/sing-box/vmess.crt ] || [ ! -f /etc/sing-box/vmess.key ]; then
+            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+                -keyout /etc/sing-box/vmess.key -out /etc/sing-box/vmess.crt -days 3650 \
+                -subj "/CN=${NEW_VMESS_SNI}" >/dev/null 2>&1 || {
+                openssl req -x509 -newkey rsa:2048 -nodes \
+                    -keyout /etc/sing-box/vmess.key -out /etc/sing-box/vmess.crt -days 3650 \
+                    -subj "/CN=${NEW_VMESS_SNI}" >/dev/null 2>&1
+            }
+        fi
     fi
 
     local NEW_PORT_SS=""
@@ -2057,142 +1793,6 @@ action_reinstall_protocols() {
         NEW_ANYTLS_USER=$(openssl rand -hex 4)
         NEW_ANYTLS_PSK=$(openssl rand -base64 16)
         info "AnyTLS Reality 端口: $NEW_PORT_ANYTLS | 用户名: $NEW_ANYTLS_USER | 密码已自动生成"
-    fi
-
-    local NEW_PORT_TROJAN=""
-    local NEW_TROJAN_PASS=""
-    local NEW_TROJAN_SNI=""
-    if $NEW_ENABLE_TROJAN; then
-        echo ""
-        info "=== 配置 Trojan (TLS + BusyBox Web回落) ==="
-        read -p "请输入 Trojan 端口 (留空则随机 10000-60000): " input_port
-        NEW_PORT_TROJAN="${input_port:-$(rand_port)}"
-        read -p "请输入 Trojan 密码 (留空自动生成): " input_pass
-        NEW_TROJAN_PASS="${input_pass:-$(rand_pass)}"
-
-        local default_trojan_sni
-        if [ -n "$user_custom_ip" ] && ! [[ "$user_custom_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            default_trojan_sni="$user_custom_ip"
-        else
-            default_trojan_sni="${NEW_REALITY_SNI:-gateway.icloud.com}"
-        fi
-        read -p "请输入 Trojan TLS SNI 伪装域名 (留空保持: ${default_trojan_sni}): " input_trojan_sni
-        NEW_TROJAN_SNI="${input_trojan_sni:-$default_trojan_sni}"
-        NEW_TROJAN_SNI="$(echo "$NEW_TROJAN_SNI" | tr -d '[:space:]')"
-
-        info "Trojan 端口: $NEW_PORT_TROJAN | SNI: $NEW_TROJAN_SNI | 密码已设置"
-    fi
-
-    # 生成 TLS 证书 (VMess / Trojan) 并配置 fake-web
-    if $NEW_ENABLE_VMESS || $NEW_ENABLE_TROJAN; then
-        local target_sni="${NEW_TROJAN_SNI:-${NEW_VMESS_SNI:-gateway.icloud.com}}"
-        mkdir -p /etc/sing-box
-        if [ ! -f /etc/sing-box/vmess.crt ] || [ ! -f /etc/sing-box/vmess.key ]; then
-            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-                -keyout /etc/sing-box/vmess.key -out /etc/sing-box/vmess.crt -days 3650 \
-                -subj "/CN=${target_sni}" >/dev/null 2>&1 || {
-                openssl req -x509 -newkey rsa:2048 -nodes \
-                    -keyout /etc/sing-box/vmess.key -out /etc/sing-box/vmess.crt -days 3650 \
-                    -subj "/CN=${target_sni}" >/dev/null 2>&1
-            }
-        fi
-        if $NEW_ENABLE_TROJAN; then
-            case "$OS" in
-                alpine) apk add --no-cache busybox-extras >/dev/null 2>&1 || true ;;
-                debian|redhat) apt-get install -y busybox >/dev/null 2>&1 || yum install -y busybox >/dev/null 2>&1 || true ;;
-            esac
-            local web_dir="/var/www/fake-site"
-            mkdir -p "$web_dir"
-            if [ ! -f "$web_dir/index.html" ]; then
-                cat > "$web_dir/index.html" <<'EOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Enterprise Edge Service Gateway</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .card { background: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1); border: 1px solid #e2e8f0; padding: 40px; max-width: 520px; width: 90%; }
-        .badge { display: inline-flex; align-items: center; background-color: #ecfdf5; color: #059669; font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 9999px; margin-bottom: 16px; }
-        .badge-dot { width: 8px; height: 8px; background-color: #10b981; border-radius: 50%; margin-right: 6px; }
-        h1 { font-size: 22px; font-weight: 700; margin: 0 0 12px 0; color: #0f172a; }
-        p { font-size: 14px; line-height: 1.6; color: #64748b; margin: 0 0 24px 0; }
-        .grid { border-top: 1px solid #f1f5f9; padding-top: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-        .item-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
-        .item-value { font-size: 14px; font-weight: 600; color: #334155; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="badge"><span class="badge-dot"></span>Service Active</div>
-        <h1>Edge Application Gateway</h1>
-        <p>This endpoint is managed by the network automation cluster. Secure ingress routing and health telemetry are operating normally.</p>
-        <div class="grid">
-            <div>
-                <div class="item-label">Status</div>
-                <div class="item-value">200 Operational</div>
-            </div>
-            <div>
-                <div class="item-label">Protocol</div>
-                <div class="item-value">HTTP/1.1 TLS</div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-EOF
-            fi
-            cat > /usr/local/bin/fake-web-server <<'EOF'
-#!/bin/sh
-WEB_DIR="/var/www/fake-site"
-mkdir -p "$WEB_DIR"
-if [ -x /usr/sbin/httpd ]; then
-    exec /usr/sbin/httpd -f -p 127.0.0.1:8080 -h "$WEB_DIR"
-elif command -v busybox >/dev/null 2>&1; then
-    exec busybox httpd -f -p 127.0.0.1:8080 -h "$WEB_DIR"
-elif command -v busybox-extras >/dev/null 2>&1; then
-    exec busybox-extras httpd -f -p 127.0.0.1:8080 -h "$WEB_DIR"
-else
-    exec httpd -f -p 127.0.0.1:8080 -h "$WEB_DIR"
-fi
-EOF
-            chmod +x /usr/local/bin/fake-web-server
-            if [ "$OS" = "alpine" ]; then
-                cat > /etc/init.d/fake-web <<'OPENRC'
-#!/sbin/openrc-run
-name="fake-web"
-description="BusyBox httpd Fallback Web Server"
-command="/usr/local/bin/fake-web-server"
-command_background="yes"
-pidfile="/run/fake-web.pid"
-depend() { need net; }
-start_pre() { checkpath --directory --mode 0755 /run; }
-OPENRC
-                chmod +x /etc/init.d/fake-web
-                rc-update add fake-web default >/dev/null 2>&1 || true
-                rc-service fake-web restart >/dev/null 2>&1 || rc-service fake-web start >/dev/null 2>&1 || true
-            else
-                cat > /etc/systemd/system/fake-web.service <<'SYSTEMD'
-[Unit]
-Description=BusyBox httpd Fallback Web Server
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/fake-web-server
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-SYSTEMD
-                systemctl daemon-reload >/dev/null 2>&1 || true
-                systemctl enable fake-web >/dev/null 2>&1 || true
-                systemctl restart fake-web >/dev/null 2>&1 || systemctl start fake-web >/dev/null 2>&1 || true
-            fi
-        fi
     fi
 
     # 6. 生成 Reality 密钥对 (如需要)
@@ -2338,35 +1938,6 @@ INBOUND_ANYTLS
         need_comma=true
     fi
 
-    if $NEW_ENABLE_TROJAN; then
-        $need_comma && echo "," >> "$TEMP_INBOUNDS"
-        cat >> "$TEMP_INBOUNDS" <<INBOUND_TROJAN
-    {
-      "type": "trojan",
-      "tag": "trojan-in",
-      "listen": "::",
-      "listen_port": $NEW_PORT_TROJAN,
-      "users": [
-        {
-          "name": "default",
-          "password": "$NEW_TROJAN_PASS"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "$NEW_TROJAN_SNI",
-        "certificate_path": "/etc/sing-box/vmess.crt",
-        "key_path": "/etc/sing-box/vmess.key"
-      },
-      "fallback": {
-        "server": "127.0.0.1",
-        "server_port": 8080
-      }
-    }
-INBOUND_TROJAN
-        need_comma=true
-    fi
-
     cat > "$CONFIG_PATH" <<CONFIG_HEAD
 {
   "log": {
@@ -2402,7 +1973,6 @@ ENABLE_REALITY=$NEW_ENABLE_REALITY
 ENABLE_VMESS=$NEW_ENABLE_VMESS
 ENABLE_SS=$NEW_ENABLE_SS
 ENABLE_ANYTLS=$NEW_ENABLE_ANYTLS
-ENABLE_TROJAN=$NEW_ENABLE_TROJAN
 EOF
 
     cat > "$CACHE_FILE" <<CACHEEOF
@@ -2410,7 +1980,6 @@ ENABLE_REALITY=$NEW_ENABLE_REALITY
 ENABLE_VMESS=$NEW_ENABLE_VMESS
 ENABLE_SS=$NEW_ENABLE_SS
 ENABLE_ANYTLS=$NEW_ENABLE_ANYTLS
-ENABLE_TROJAN=$NEW_ENABLE_TROJAN
 CUSTOM_IP=$user_custom_ip
 CACHEEOF
 
@@ -2440,12 +2009,6 @@ CACHEEOF
 ANYTLS_PORT=$NEW_PORT_ANYTLS
 ANYTLS_USER=$NEW_ANYTLS_USER
 ANYTLS_PSK=$NEW_ANYTLS_PSK
-CACHEEOF
-
-    $NEW_ENABLE_TROJAN && cat >> "$CACHE_FILE" <<CACHEEOF
-PORT_TROJAN=$NEW_PORT_TROJAN
-TROJAN_PASS=$NEW_TROJAN_PASS
-TROJAN_SNI=$NEW_TROJAN_SNI
 CACHEEOF
 
     # 10. 检查配置并启动服务
@@ -2500,12 +2063,6 @@ MENU
     if [ "${ENABLE_ANYTLS:-false}" = "true" ]; then
         echo "$option) 重置 AnyTLS Reality 端口"
         MENU_MAP[$option]="reset_anytls"
-        option=$((option + 1))
-    fi
-
-    if [ "${ENABLE_TROJAN:-false}" = "true" ]; then
-        echo "$option) 重置 Trojan 端口与密码"
-        MENU_MAP[$option]="reset_trojan"
         option=$((option + 1))
     fi
 
@@ -2567,7 +2124,6 @@ while true; do
                 reset_vmess) action_reset_vmess ;;
                 reset_ss) action_reset_ss ;;
                 reset_anytls) action_reset_anytls ;;
-                reset_trojan) action_reset_trojan ;;
                 start) service_start && info "已启动" ;;
                 stop) service_stop && info "已停止" ;;
                 restart) service_restart && info "已重启" ;;
