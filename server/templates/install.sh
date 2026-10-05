@@ -1970,87 +1970,64 @@ KILLER_SVC_EOF
     auto_heal_broken_containers
 }
 
-# 配置容器网络与 SSH 常驻自愈守护定时器（每 2 分钟全自动巡检与修复）
-setup_auto_heal_daemon() {
-    cat > /usr/local/bin/incudal-auto-heal.sh <<'EOF'
-#!/usr/bin/env bash
-# Incudal Container Network & SSH Auto-Heal Guardian
-set -euo pipefail
-
-command -v incus >/dev/null 2>&1 || exit 0
-running_containers=$(incus list --format csv -c n,s 2>/dev/null | awk -F',' '$2=="RUNNING" {print $1}' || true)
-[[ -z "$running_containers" ]] && exit 0
-
-DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1 || true)
-host_mtu=""
-if [[ -n "$DEFAULT_IFACE" ]]; then
-    host_mtu=$(ip -o link show dev "$DEFAULT_IFACE" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}' || true)
-fi
-[[ -z "$host_mtu" ]] && host_mtu="1500"
-
-for c in $running_containers; do
-    # 1. 自动对齐容器内部 eth0 MTU 为宿主机物理 MTU
-    if [[ -n "$host_mtu" ]]; then
-        incus exec "$c" -- ip link set dev eth0 mtu "$host_mtu" >/dev/null 2>&1 || true
-    fi
-
-    # 2. 检查是否缺失 sshd
-    if ! incus exec "$c" -- which sshd >/dev/null 2>&1; then
-        logger -t incudal-auto-heal "Container [$c] missing sshd, starting auto-heal..."
-        if incus exec "$c" -- test -x /usr/local/bin/incus-setup.sh >/dev/null 2>&1; then
-            incus exec "$c" -- /usr/local/bin/incus-setup.sh >/dev/null 2>&1 || true
-        elif incus exec "$c" -- test -f /etc/alpine-release >/dev/null 2>&1; then
-            incus exec "$c" -- sh -c 'sed -i "s/https:/http:/g" /etc/apk/repositories 2>/dev/null; apk update && apk add --no-cache --allow-untrusted openssh openssh-server-pam bash shadow sed grep dhcpcd util-linux ca-certificates iproute2 && [ -x /usr/local/bin/incus-setup.sh ] && /usr/local/bin/incus-setup.sh || rc-service sshd restart' >/dev/null 2>&1 || true
-        elif incus exec "$c" -- test -f /etc/debian_version >/dev/null 2>&1; then
-            incus exec "$c" -- sh -c 'apt-get update && apt-get install -y openssh-server && systemctl restart ssh' >/dev/null 2>&1 || true
-        fi
-    else
-        # 确保已有 sshd 处于运行状态
-        if incus exec "$c" -- test -f /etc/init.d/sshd >/dev/null 2>&1; then
-            incus exec "$c" -- rc-service sshd status >/dev/null 2>&1 || incus exec "$c" -- rc-service sshd start >/dev/null 2>&1 || true
-        elif incus exec "$c" -- command -v systemctl >/dev/null 2>&1; then
-            incus exec "$c" -- systemctl is-active --quiet ssh >/dev/null 2>&1 || incus exec "$c" -- systemctl is-active --quiet sshd >/dev/null 2>&1 || incus exec "$c" -- systemctl start ssh >/dev/null 2>&1 || incus exec "$c" -- systemctl start sshd >/dev/null 2>&1 || true
-        fi
-    fi
-done
-EOF
-    chmod +x /usr/local/bin/incudal-auto-heal.sh
-
-    cat > /etc/systemd/system/incudal-auto-heal.service <<'EOF'
-[Unit]
-Description=Incudal Container Auto-Heal Service
-After=network.target incus.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/incudal-auto-heal.sh
-EOF
-
-    cat > /etc/systemd/system/incudal-auto-heal.timer <<'EOF'
-[Unit]
-Description=Incudal Container Auto-Heal Timer (every 2 minutes)
-After=network.target incus.service
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=2min
-AccuracySec=10s
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now incudal-auto-heal.timer 2>/dev/null || true
-}
-
-# 自动检测并修复因网络阻断导致 cloud-init 依赖安装失败或 MTU 异常的已有容器
+## 自动检测并修复因网络阻断导致 cloud-init 依赖安装失败或 MTU 异常的已有容器 (单次按需体检，无常驻后台开销)
 auto_heal_broken_containers() {
-    setup_auto_heal_daemon
-    if [[ -x /usr/local/bin/incudal-auto-heal.sh ]]; then
-        /usr/local/bin/incudal-auto-heal.sh || true
+    # 彻底清理并移除旧版每 2 分钟常驻自愈守护定时器，避免高频空转浪费宿主机 CPU
+    if systemctl is-active --quiet incudal-auto-heal.timer 2>/dev/null || systemctl is-enabled --quiet incudal-auto-heal.timer 2>/dev/null || [[ -f /etc/systemd/system/incudal-auto-heal.timer ]]; then
+        systemctl disable --now incudal-auto-heal.timer 2>/dev/null || true
+        systemctl stop incudal-auto-heal.service 2>/dev/null || true
+        rm -f /etc/systemd/system/incudal-auto-heal.timer /etc/systemd/system/incudal-auto-heal.service /usr/local/bin/incudal-auto-heal.sh
+        systemctl daemon-reload 2>/dev/null || true
+        log "已彻底清理旧版常驻自愈守护定时任务 (避免空转浪费 CPU)"
     fi
-    log "容器网络与 SSH 常驻自愈定时任务 (incudal-auto-heal.timer，每 2 分钟巡检) 已激活就绪"
+
+    command -v incus >/dev/null 2>&1 || return 0
+    local running_containers=""
+    running_containers=$(incus list --format csv -c n,s 2>/dev/null | awk -F',' '$2=="RUNNING" {print $1}' || true)
+    [[ -z "$running_containers" ]] && return 0
+
+    local host_mtu=""
+    host_mtu=$(ip -o link show dev "$DEFAULT_IFACE" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}' || true)
+    [[ -z "$host_mtu" ]] && host_mtu="1500"
+
+    step "正在体检并自愈容器内部网络 MTU 与 SSH 状态..."
+    local healed=0
+    for c in $running_containers; do
+        # 1. 自动对齐容器内部 eth0 MTU 为宿主机物理 MTU
+        if [[ -n "$host_mtu" ]]; then
+            incus exec "$c" -- ip link set dev eth0 mtu "$host_mtu" >/dev/null 2>&1 || true
+        fi
+
+        # 2. 检查是否缺失 sshd
+        if ! incus exec "$c" -- which sshd >/dev/null 2>&1; then
+            if incus exec "$c" -- test -x /usr/local/bin/incus-setup.sh >/dev/null 2>&1; then
+                info "发现容器 [${c}] 缺失 SSH 服务，正在执行初始化脚本修复..."
+                incus exec "$c" -- /usr/local/bin/incus-setup.sh >/dev/null 2>&1 || true
+                healed=$((healed+1))
+            elif incus exec "$c" -- test -f /etc/alpine-release >/dev/null 2>&1; then
+                info "发现容器 [${c}] 缺失 SSH 服务，正在自动联网修复..."
+                incus exec "$c" -- sh -c 'sed -i "s/https:/http:/g" /etc/apk/repositories 2>/dev/null; apk update && apk add --no-cache --allow-untrusted openssh openssh-server-pam bash shadow sed grep dhcpcd util-linux ca-certificates iproute2 && [ -x /usr/local/bin/incus-setup.sh ] && /usr/local/bin/incus-setup.sh || rc-service sshd restart' >/dev/null 2>&1 || true
+                healed=$((healed+1))
+            elif incus exec "$c" -- test -f /etc/debian_version >/dev/null 2>&1; then
+                info "发现容器 [${c}] 缺失 SSH 服务，正在自动联网修复..."
+                incus exec "$c" -- sh -c 'apt-get update && apt-get install -y openssh-server && systemctl restart ssh' >/dev/null 2>&1 || true
+                healed=$((healed+1))
+            fi
+        else
+            # 确保已有 sshd 处于运行状态
+            if incus exec "$c" -- test -f /etc/init.d/sshd >/dev/null 2>&1; then
+                incus exec "$c" -- rc-service sshd status >/dev/null 2>&1 || incus exec "$c" -- rc-service sshd start >/dev/null 2>&1 || true
+            elif incus exec "$c" -- command -v systemctl >/dev/null 2>&1; then
+                incus exec "$c" -- systemctl is-active --quiet ssh >/dev/null 2>&1 || incus exec "$c" -- systemctl is-active --quiet sshd >/dev/null 2>&1 || incus exec "$c" -- systemctl start ssh >/dev/null 2>&1 || incus exec "$c" -- systemctl start sshd >/dev/null 2>&1 || true
+            fi
+        fi
+    done
+
+    if [[ "$healed" -gt 0 ]]; then
+        log "已自动修复 ${healed} 个之前因网络故障未能初始化 SSH 的容器"
+    else
+        log "所有运行中容器网络 MTU 与 SSH 状态体检正常"
+    fi
 }
 
 # ========================== 一键体检与母机修复 (无损模式) ==========================
@@ -2092,6 +2069,7 @@ do_repair_host() {
     echo -e "  TCP MSS 钳制 :  ${GREEN}已激活${NC} (彻底根除大包断流卡死)"
     echo -e "  网桥高速 DNS :  ${GREEN}已配置${NC} (1.1.1.1 / 8.8.8.8 秒级解析)"
     echo -e "  防火墙兼容   :  ${GREEN}已适配${NC} (Docker / UFW / Firewalld 放行)"
+    echo -e "  容器 SSH 自愈:  ${GREEN}已体检完成${NC} (单次按需自愈，无常驻后台开销)"
     if [[ "$report_connlimit" == "0" ]]; then
         echo -e "  并发限制守护 :  ${YELLOW}已关闭${NC}"
     else
@@ -3475,6 +3453,15 @@ do_uninstall() {
         rm -f /usr/local/bin/incus-v6-guardian.sh
         systemctl daemon-reload
         info "已清理: IPv6 双栈同步守护神 (Guardian Daemon)"
+    fi
+
+    # 4. 清理容器网络自愈守护定时任务
+    if systemctl list-unit-files 2>/dev/null | grep -q "incudal-auto-heal"; then
+        systemctl stop incudal-auto-heal.timer incudal-auto-heal.service 2>/dev/null || true
+        systemctl disable incudal-auto-heal.timer incudal-auto-heal.service 2>/dev/null || true
+        rm -f /etc/systemd/system/incudal-auto-heal.timer /etc/systemd/system/incudal-auto-heal.service /usr/local/bin/incudal-auto-heal.sh
+        systemctl daemon-reload
+        info "已清理: 容器网络自愈守护定时任务"
     fi
 
     # ---- 步骤 8: 清理配置文件和数据目录 ----
