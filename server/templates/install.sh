@@ -1699,6 +1699,8 @@ YAML
 
     incus admin init --preseed < "$PRESEED_FILE"
     log "Incus 初始化完成"
+    # 为 default profile 默认注入关闭 TCP 时间戳，彻底根除容器内移动端 CGNAT 导致的 PAWS 握手丢包
+    incus profile set default linux.sysctl.net.ipv4.tcp_timestamps=0 2>/dev/null || true
     setup_network_firewall_compat
 }
 
@@ -1746,7 +1748,16 @@ setup_network_firewall_compat() {
         fi
     fi
 
-    # 3. 生成常驻守护脚本
+    # 3. 容器实例内核参数优化：配置 Incus profile 并对运行中容器关闭 TCP 时间戳
+    # 彻底杜绝移动蜂窝网络（4G/5G CGNAT）下 PAWS 机制误杀导致手机端 TLS 握手丢包与连接超时
+    if command -v incus >/dev/null 2>&1; then
+        incus profile set default linux.sysctl.net.ipv4.tcp_timestamps=0 2>/dev/null || true
+        for _inst in $(incus list -c n --format csv status=RUNNING 2>/dev/null || true); do
+            incus exec "$_inst" -- sh -c 'mkdir -p /etc/sysctl.d && echo "net.ipv4.tcp_timestamps = 0" > /etc/sysctl.d/99-incudal-tcp-timestamps.conf && sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1' 2>/dev/null || true
+        done
+    fi
+
+    # 4. 生成常驻守护脚本
     cat > /usr/local/bin/incus-network-compat.sh <<EOF
 #!/usr/bin/env bash
 # Incudal Incus Network & Firewall Compatibility Guardian
@@ -1776,6 +1787,9 @@ sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.netfilter.nf_conntrack_max=1048576 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true
+if command -v incus >/dev/null 2>&1; then
+    incus profile set default linux.sysctl.net.ipv4.tcp_timestamps=0 2>/dev/null || true
+fi
 
 # 连接跟踪快速回收（避免空闲死连接长期占用并发配额导致误伤，将默认5天缩短至10分钟）
 sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=600 >/dev/null 2>&1 || true

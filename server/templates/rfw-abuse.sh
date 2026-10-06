@@ -385,6 +385,12 @@ apply_rules() {
     if [[ -f /etc/sysctl.conf ]]; then
         sed -i 's/net.ipv4.tcp_timestamps\s*=\s*1/net.ipv4.tcp_timestamps = 0/g' /etc/sysctl.conf 2>/dev/null || true
     fi
+    if command -v incus >/dev/null 2>&1; then
+        incus profile set default linux.sysctl.net.ipv4.tcp_timestamps=0 2>/dev/null || true
+        for _c in $(incus list -c n --format csv status=RUNNING 2>/dev/null || true); do
+            incus exec "$_c" -- sh -c 'mkdir -p /etc/sysctl.d && echo "net.ipv4.tcp_timestamps = 0" > /etc/sysctl.d/99-incudal-tcp-timestamps.conf && sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1' 2>/dev/null || true
+        done
+    fi
 
     local ssh_ports
     ssh_ports=$(detect_ssh_ports)
