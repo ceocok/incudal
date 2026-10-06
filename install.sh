@@ -1210,7 +1210,8 @@ net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_rfc1337 = 0
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
-net.ipv4.tcp_timestamps = 1
+# 【重要】关闭 TCP 时间戳：彻底解决移动端 4G/5G CGNAT / 热点 NAT 下 PAWS 机制误杀导致大 TLS 握手包丢包与 EOF 断开
+net.ipv4.tcp_timestamps = 0
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_moderate_rcvbuf = 1
@@ -1717,6 +1718,7 @@ setup_network_firewall_compat() {
     sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
     sysctl -w net.netfilter.nf_conntrack_max=1048576 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true
 
     # 2. 检测宿主机物理出口网卡 MTU，避免 PMTU 黑洞大包断流
     local host_mtu=""
@@ -1773,6 +1775,7 @@ sysctl -w net.bridge.bridge-nf-call-arptables=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.netfilter.nf_conntrack_max=1048576 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true
 
 # 连接跟踪快速回收（避免空闲死连接长期占用并发配额导致误伤，将默认5天缩短至10分钟）
 sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=600 >/dev/null 2>&1 || true

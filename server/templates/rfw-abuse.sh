@@ -8,7 +8,7 @@
 
 set -e
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.5.1"
 INSTALL_PATH="/usr/local/bin/rfw-abuse"
 SERVICE_PATH="/etc/systemd/system/rfw-abuse.service"
 
@@ -376,6 +376,15 @@ apply_rules() {
 
     check_dependencies
     clean_rules
+
+    # 优化内核网络参数：关闭 TCP 时间戳（彻底根除移动端 4G/5G CGNAT / 热点 NAT 下 PAWS 机制误杀导致大 TLS 握手包丢包与 EOF 断开）
+    sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true
+    if [[ -f /etc/sysctl.d/99-incus.conf ]]; then
+        sed -i 's/net.ipv4.tcp_timestamps\s*=\s*1/net.ipv4.tcp_timestamps = 0/g' /etc/sysctl.d/99-incus.conf 2>/dev/null || true
+    fi
+    if [[ -f /etc/sysctl.conf ]]; then
+        sed -i 's/net.ipv4.tcp_timestamps\s*=\s*1/net.ipv4.tcp_timestamps = 0/g' /etc/sysctl.conf 2>/dev/null || true
+    fi
 
     local ssh_ports
     ssh_ports=$(detect_ssh_ports)
