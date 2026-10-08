@@ -119,58 +119,61 @@ rand_uuid() {
 }
 
 # -----------------------
-# 优质 Reality 伪装域名池 (支持 TLS 1.3 / HTTP/2)
+# 优质 Reality 伪装域名池 (必须严格支持 TLS 1.3 / HTTP/2，杜绝任何连接拒绝或内网阻断域名)
 SNI_POOL=(
-    "gateway.icloud.com"
-    "itunes.apple.com"
-    "download.apple.com"
-    "swdist.apple.com"
-    "xp.apple.com"
-    "mask.icloud.com"
-    "mask-api.icloud.com"
-    "configuration.apple.com"
+    "www.microsoft.com"
     "learn.microsoft.com"
     "azure.microsoft.com"
-    "www.microsoft.com"
-    "update.microsoft.com"
     "c.s-microsoft.com"
     "catalog.update.microsoft.com"
-    "edge.microsoft.com"
     "assets.msn.com"
-    "addons.mozilla.org"
-    "telemetry.mozilla.org"
     "dl-cdn.alpinelinux.org"
     "deb.debian.org"
-    "archive.ubuntu.com"
-    "security.ubuntu.com"
-    "mirrors.kernel.org"
-    "cdn.kernel.org"
     "crates.io"
     "pypi.org"
-    "registry.npmjs.org"
     "rubygems.org"
     "www.docker.com"
-    "hub.docker.com"
-    "dl.google.com"
-    "fonts.googleapis.com"
-    "cloudflare.com"
-    "blog.cloudflare.com"
+    "images-na.ssl-images-amazon.com"
     "aws.amazon.com"
     "www.amazon.com"
-    "images-na.ssl-images-amazon.com"
-    "www.speedtest.net"
-    "www.nvidia.com"
-    "www.oracle.com"
-    "www.cisco.com"
-    "www.intel.com"
     "www.amd.com"
+    "www.nvidia.com"
+    "www.cisco.com"
+    "www.oracle.com"
+    "www.intel.com"
+    "cloudflare.com"
+    "blog.cloudflare.com"
+    "www.speedtest.net"
     "zoom.us"
     "www.samsung.com"
-    "www.tesla.com"
 )
+
+# 默认黄金安全伪装域名
+DEFAULT_SAFE_SNI="www.microsoft.com"
 
 # 随机推荐一个伪装域名
 RANDOM_DEFAULT_SNI="${SNI_POOL[$((RANDOM % ${#SNI_POOL[@]}))]}"
+
+# 校验 SNI 连通性与 TLS 1.3 握手
+verify_sni() {
+    local target="$1"
+    info "正在校验 Reality 伪装域名 [${target}] 是否支持 TLS 1.3 握手..."
+    local ok=false
+    if openssl s_client -connect "${target}:443" -servername "${target}" -tls1_3 </dev/null >/dev/null 2>&1; then
+        ok=true
+    elif curl -fsSI --connect-timeout 4 "https://${target}" >/dev/null 2>&1; then
+        ok=true
+    fi
+    
+    if $ok; then
+        info "Reality 伪装域名 [${target}] 校验通过 (443 端口正常，支持 TLS 1.3)"
+        return 0
+    else
+        warn "警告: 伪装域名 [${target}] 在当前服务器无法完成 443 端口 TLS 握手！"
+        warn "使用无法连通的域名会导致 Reality 畸形握手并极易导致 IP 被墙！"
+        return 1
+    fi
+}
 
 # -----------------------
 # 配置节点名称后缀
@@ -282,13 +285,21 @@ CUSTOM_IP="$(echo "$CUSTOM_IP" | tr -d '[:space:]')"
 REALITY_SNI=""
 if $ENABLE_REALITY || $ENABLE_ANYTLS; then
     echo ""
-    info "已从伪装域名库中随机推荐 SNI: \033[1;32m${RANDOM_DEFAULT_SNI}\033[0m"
+    info "已从安全伪装域名库中随机推荐 SNI: \033[1;32m${RANDOM_DEFAULT_SNI}\033[0m"
     echo "请输入 Reality 的 SNI 伪装域名 (留空直接回车使用推荐: ${RANDOM_DEFAULT_SNI}):"
     read -r USER_SNI
     REALITY_SNI="${USER_SNI:-$RANDOM_DEFAULT_SNI}"
     REALITY_SNI="$(echo "$REALITY_SNI" | tr -d '[:space:]')"
+
+    # 自动进行连通性与握手验证
+    if ! verify_sni "$REALITY_SNI"; then
+        warn "检测到 [${REALITY_SNI}] 无法通过 TLS 握手验证，为防止节点异常及母机 IP 被墙，"
+        info "自动切换为黄金安全伪装域名: \033[1;32m${DEFAULT_SAFE_SNI}\033[0m"
+        REALITY_SNI="$DEFAULT_SAFE_SNI"
+        verify_sni "$REALITY_SNI" || true
+    fi
 else
-    REALITY_SNI="$RANDOM_DEFAULT_SNI"
+    REALITY_SNI="$DEFAULT_SAFE_SNI"
 fi
 
 # 如果选择了 VMess 协议，询问 VMess TLS SNI 伪装域名
@@ -1108,7 +1119,7 @@ read_config() {
         . "$CACHE_FILE"
     fi
     
-    REALITY_SNI="${REALITY_SNI:-gateway.icloud.com}"
+    REALITY_SNI="${REALITY_SNI:-www.microsoft.com}"
     ENABLE_REALITY="${ENABLE_REALITY:-false}"
     ENABLE_VMESS="${ENABLE_VMESS:-false}"
     ENABLE_SS="${ENABLE_SS:-false}"
@@ -1608,7 +1619,7 @@ RELAY_EOF
     sed -i "s|__INBOUND_PORT__|$SS_PORT|g" "$RELAY_SCRIPT"
     sed -i "s|__INBOUND_METHOD__|$SS_METHOD|g" "$RELAY_SCRIPT"
     sed -i "s|__INBOUND_PASSWORD__|$SS_PSK|g" "$RELAY_SCRIPT"
-    sed -i "s|__REALITY_SNI__|${REALITY_SNI:-gateway.icloud.com}|g" "$RELAY_SCRIPT"
+    sed -i "s|__REALITY_SNI__|${REALITY_SNI:-www.microsoft.com}|g" "$RELAY_SCRIPT"
     
     chmod +x "$RELAY_SCRIPT"
     
@@ -1695,28 +1706,46 @@ action_reinstall_protocols() {
     local NEW_REALITY_SNI=""
     if $NEW_ENABLE_REALITY || $NEW_ENABLE_ANYTLS; then
         local sni_pool=(
-            "gateway.icloud.com"
-            "itunes.apple.com"
-            "download.apple.com"
-            "mask.icloud.com"
+            "www.microsoft.com"
             "learn.microsoft.com"
             "azure.microsoft.com"
-            "www.microsoft.com"
-            "edge.microsoft.com"
+            "c.s-microsoft.com"
+            "catalog.update.microsoft.com"
+            "assets.msn.com"
             "dl-cdn.alpinelinux.org"
             "deb.debian.org"
-            "cloudflare.com"
+            "crates.io"
+            "pypi.org"
+            "rubygems.org"
+            "www.docker.com"
+            "images-na.ssl-images-amazon.com"
             "aws.amazon.com"
-            "www.speedtest.net"
+            "www.amazon.com"
+            "www.amd.com"
             "www.nvidia.com"
+            "www.cisco.com"
+            "www.oracle.com"
+            "www.intel.com"
+            "cloudflare.com"
+            "blog.cloudflare.com"
+            "www.speedtest.net"
+            "zoom.us"
+            "www.samsung.com"
         )
         local random_sni="${sni_pool[$((RANDOM % ${#sni_pool[@]}))]}"
         local current_sni="${REALITY_SNI:-$random_sni}"
         echo ""
-        info "已推荐 SNI: \033[1;32m${current_sni}\033[0m"
+        info "已推荐安全 SNI: \033[1;32m${current_sni}\033[0m"
         read -p "请输入 Reality 的 SNI 伪装域名 (留空保持: ${current_sni}): " user_sni
         NEW_REALITY_SNI="${user_sni:-$current_sni}"
         NEW_REALITY_SNI="$(echo "$NEW_REALITY_SNI" | tr -d '[:space:]')"
+
+        if ! verify_sni "$NEW_REALITY_SNI"; then
+            warn "检测到 [${NEW_REALITY_SNI}] 无法通过 TLS 握手验证，"
+            info "自动切换为黄金安全伪装域名: \033[1;32m${DEFAULT_SAFE_SNI}\033[0m"
+            NEW_REALITY_SNI="$DEFAULT_SAFE_SNI"
+            verify_sni "$NEW_REALITY_SNI" || true
+        fi
     fi
 
     # 5. 配置各协议端口和凭据
@@ -1748,7 +1777,7 @@ action_reinstall_protocols() {
         if [ -n "$user_custom_ip" ] && ! [[ "$user_custom_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             default_vmess_sni="$user_custom_ip"
         else
-            default_vmess_sni="${NEW_REALITY_SNI:-gateway.icloud.com}"
+            default_vmess_sni="${NEW_REALITY_SNI:-www.microsoft.com}"
         fi
         read -p "请输入 VMess TLS SNI 伪装域名 (留空保持: ${default_vmess_sni}): " input_vmess_sni
         NEW_VMESS_SNI="${input_vmess_sni:-$default_vmess_sni}"
