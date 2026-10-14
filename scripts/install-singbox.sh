@@ -119,37 +119,21 @@ rand_uuid() {
 }
 
 # -----------------------
-# 优质 Reality 伪装域名池 (必须严格支持 TLS 1.3 / HTTP/2，杜绝任何连接拒绝或内网阻断域名)
+# 优质 Reality 伪装域名池 (必须严格支持 TLS 1.3 / HTTP/2，仅使用 Fastly/中立CDN承载的开源镜像源，杜绝巨头品牌域名)
 SNI_POOL=(
-    "www.microsoft.com"
-    "learn.microsoft.com"
-    "azure.microsoft.com"
-    "c.s-microsoft.com"
-    "catalog.update.microsoft.com"
-    "assets.msn.com"
     "dl-cdn.alpinelinux.org"
     "deb.debian.org"
     "crates.io"
     "pypi.org"
     "rubygems.org"
-    "www.docker.com"
-    "images-na.ssl-images-amazon.com"
-    "aws.amazon.com"
-    "www.amazon.com"
-    "www.amd.com"
-    "www.nvidia.com"
-    "www.cisco.com"
-    "www.oracle.com"
-    "www.intel.com"
-    "cloudflare.com"
-    "blog.cloudflare.com"
-    "www.speedtest.net"
-    "zoom.us"
-    "www.samsung.com"
+    "addons.mozilla.org"
+    "formulae.brew.sh"
+    "static.rust-lang.org"
+    "cpan.org"
 )
 
 # 默认黄金安全伪装域名
-DEFAULT_SAFE_SNI="www.microsoft.com"
+DEFAULT_SAFE_SNI="dl-cdn.alpinelinux.org"
 
 # 随机推荐一个伪装域名
 RANDOM_DEFAULT_SNI="${SNI_POOL[$((RANDOM % ${#SNI_POOL[@]}))]}"
@@ -758,7 +742,7 @@ INBOUND_ANYTLS
   },
   "ntp": {
     "enabled": true,
-    "server": "time.apple.com",
+    "server": "pool.ntp.org",
     "server_port": 123,
     "interval": "30m"
   },
@@ -1119,7 +1103,7 @@ read_config() {
         . "$CACHE_FILE"
     fi
     
-    REALITY_SNI="${REALITY_SNI:-www.microsoft.com}"
+    REALITY_SNI="${REALITY_SNI:-dl-cdn.alpinelinux.org}"
     ENABLE_REALITY="${ENABLE_REALITY:-false}"
     ENABLE_VMESS="${ENABLE_VMESS:-false}"
     ENABLE_SS="${ENABLE_SS:-false}"
@@ -1619,7 +1603,7 @@ RELAY_EOF
     sed -i "s|__INBOUND_PORT__|$SS_PORT|g" "$RELAY_SCRIPT"
     sed -i "s|__INBOUND_METHOD__|$SS_METHOD|g" "$RELAY_SCRIPT"
     sed -i "s|__INBOUND_PASSWORD__|$SS_PSK|g" "$RELAY_SCRIPT"
-    sed -i "s|__REALITY_SNI__|${REALITY_SNI:-www.microsoft.com}|g" "$RELAY_SCRIPT"
+    sed -i "s|__REALITY_SNI__|${REALITY_SNI:-dl-cdn.alpinelinux.org}|g" "$RELAY_SCRIPT"
     
     chmod +x "$RELAY_SCRIPT"
     
@@ -1706,31 +1690,15 @@ action_reinstall_protocols() {
     local NEW_REALITY_SNI=""
     if $NEW_ENABLE_REALITY || $NEW_ENABLE_ANYTLS; then
         local sni_pool=(
-            "www.microsoft.com"
-            "learn.microsoft.com"
-            "azure.microsoft.com"
-            "c.s-microsoft.com"
-            "catalog.update.microsoft.com"
-            "assets.msn.com"
             "dl-cdn.alpinelinux.org"
             "deb.debian.org"
             "crates.io"
             "pypi.org"
             "rubygems.org"
-            "www.docker.com"
-            "images-na.ssl-images-amazon.com"
-            "aws.amazon.com"
-            "www.amazon.com"
-            "www.amd.com"
-            "www.nvidia.com"
-            "www.cisco.com"
-            "www.oracle.com"
-            "www.intel.com"
-            "cloudflare.com"
-            "blog.cloudflare.com"
-            "www.speedtest.net"
-            "zoom.us"
-            "www.samsung.com"
+            "addons.mozilla.org"
+            "formulae.brew.sh"
+            "static.rust-lang.org"
+            "cpan.org"
         )
         local random_sni="${sni_pool[$((RANDOM % ${#sni_pool[@]}))]}"
         local current_sni="${REALITY_SNI:-$random_sni}"
@@ -1777,7 +1745,7 @@ action_reinstall_protocols() {
         if [ -n "$user_custom_ip" ] && ! [[ "$user_custom_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             default_vmess_sni="$user_custom_ip"
         else
-            default_vmess_sni="${NEW_REALITY_SNI:-www.microsoft.com}"
+            default_vmess_sni="${NEW_REALITY_SNI:-dl-cdn.alpinelinux.org}"
         fi
         read -p "请输入 VMess TLS SNI 伪装域名 (留空保持: ${default_vmess_sni}): " input_vmess_sni
         NEW_VMESS_SNI="${input_vmess_sni:-$default_vmess_sni}"
@@ -1975,7 +1943,7 @@ INBOUND_ANYTLS
   },
   "ntp": {
     "enabled": true,
-    "server": "time.apple.com",
+    "server": "pool.ntp.org",
     "server_port": 123,
     "interval": "30m"
   },
