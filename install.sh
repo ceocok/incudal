@@ -1910,30 +1910,30 @@ EOF
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now incus-network-compat.service 2>/dev/null || true
 
-    # 6. 配置容器违规进程秒级击毙守护服务 (实时击毙 MTProto/MTG 代理、x-ui/3x-ui/s-ui 代理面板与系统 DD 脚本，防止母机被墙/被毁)
+    # 6. 配置容器违规进程秒级击毙守护服务 (实时击毙 MTProto/MTG 代理、x-ui/3x-ui/s-ui 代理面板、OpenVPN/Free-Proxy 与系统 DD 脚本，防止母机被墙/被毁)
     systemctl stop incudal-rogue-killer.service 2>/dev/null || true
     systemctl disable incudal-rogue-killer.service 2>/dev/null || true
     rm -f /etc/systemd/system/incudal-rogue-killer.service /usr/local/bin/incudal-rogue-killer.sh 2>/dev/null || true
 
     cat > /usr/local/bin/rfw-antidd-daemon <<'KILLER_EOF'
 #!/usr/bin/env bash
-# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto & ProxyPanels)
-PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|(^|[ /])(CloudflareSpeedTest|cf-speedtest|mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)|(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\.sh|3x-ui\.sh|s-ui\.sh|(^|[ /])(chrome|chromium|chromedriver|geckodriver|selenium|playwright|puppeteer)([[:space:]]|$)"
+# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels, Airport Nodes & OpenVPN/FreeProxy)
+PATTERN="OsMutation|reinstall\.sh|InstallNET|NewReinstall|debi\.sh|clean-vps|G-Reinstall|(^|[ /])(CloudflareSpeedTest|cf-speedtest|mtg|mtproto-proxy|teleproxy|mtp-proxy|mtproxy)([[:space:]]|$)|(^|[ /])(x-ui|3x-ui|s-ui|v2-ui)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui)/|x-ui\.sh|3x-ui\.sh|s-ui\.sh|(^|[ /])(chrome|chromium|chromedriver|geckodriver|selenium|playwright|puppeteer)([[:space:]]|$)|(^|[ /])(openvpn|openvpn-as|ovpn-server|ovpn-client|free-proxy|free-proxy-pool|proxy-pool|proxy_pool|proxypool|IPProxyPool|proxybroker|proxy-scraper|proxy-scraper-checker|tinyproxy|3proxy|danted|microsocks|ocserv|pptpd|xl2tpd|vpnserver)([[:space:]]|$)|openvpn-install(\.sh)?|free-proxy"
 while true; do
     pids=$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="$PATTERN" '$1 >= 1000000 && $0 ~ pat && $0 !~ /rfw-antidd/ {print $2}')
     for p in $pids; do
         if kill -9 "$p" 2>/dev/null; then
-            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Bot/Browser): PID $p"
+            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Airport/VPN/FreeProxy/Bot/Browser): PID $p"
         fi
     done
-    sleep 60
+    sleep 5
 done
 KILLER_EOF
     chmod +x /usr/local/bin/rfw-antidd-daemon
 
     cat > /etc/systemd/system/rfw-antidd.service <<'KILLER_SVC_EOF'
 [Unit]
-Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto & ProxyPanels)
+Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels, Airport Nodes & OpenVPN/FreeProxy)
 After=incus.service
 
 [Service]
@@ -3079,11 +3079,11 @@ do_rfw_cleanup() {
     log "RFW 防火墙已卸载"
 }
 
-# ========================== RFW 防滥用管理 (测速/挖矿/BT/DD/MTProto/代理面板/商业机场对接) ==========================
+# ========================== RFW 防滥用管理 (测速/挖矿/BT/DD/MTProto/代理面板/OpenVPN/Free-Proxy/商业机场对接) ==========================
 manage_rfw_abuse() {
     echo ""
     divider
-    echo -e "  ${BOLD}RFW 防滥用防火墙 (屏蔽测速/挖矿/BT/DD/MTProto/代理面板/SSPanel商业机场对接)${NC}"
+    echo -e "  ${BOLD}RFW 防滥用防火墙 (屏蔽测速/挖矿/BT/DD/MTProto/代理面板/OpenVPN/Free-Proxy/商业机场对接)${NC}"
     divider
     echo ""
 

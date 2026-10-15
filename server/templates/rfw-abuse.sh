@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Incudal - RFW 防火墙防滥用扩展脚本 (RFW Abuse Shield)
-# 功能：屏蔽 测速 (Speedtest/iPerf/CloudflareSpeedTest) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板与商业机场对接 (x-ui/3x-ui/s-ui/SSPanel/V2board/XrayR)
+# 功能：屏蔽 测速 (Speedtest/iPerf/CloudflareSpeedTest) / 挖矿 (Stratum/Pools) / BT与P2P (BitTorrent/DHT/迅雷) / 跑分压测 (Geekbench/YABS) / DD重装系统 / MTProto代理 / 代理面板与商业机场对接 (x-ui/3x-ui/s-ui/SSPanel/V2board/XrayR) / OpenVPN与公开代理程序 (openvpn/free-proxy/proxy-pool)
 # 作用域：FORWARD (容器与NAT VPS实例) + OUTPUT (宿主机本身) + INPUT (入站P2P探针)
 # 支持：IPv4 (iptables) + IPv6 (ip6tables) 双栈
 # ==============================================================================
 
 set -e
 
-SCRIPT_VERSION="1.5.1"
+SCRIPT_VERSION="1.6.0"
 INSTALL_PATH="/usr/local/bin/rfw-abuse"
 SERVICE_PATH="/etc/systemd/system/rfw-abuse.service"
 
@@ -114,14 +114,15 @@ clean_dd_dns_sinkhole() {
     fi
 }
 
-# 宿主机实时反滥用与违规代理守护进程（秒级击毙容器内运行的 DD 脚本、MTProto 代理与 x-ui/3x-ui/s-ui 面板）
+# 宿主机实时反滥用与违规代理守护进程（秒级击毙容器内运行的 DD 脚本、MTProto 代理、x-ui/3x-ui/s-ui 面板与 OpenVPN/Free-Proxy）
 apply_antidd_daemon() {
     local enable_dd="${1:-true}"
     local enable_mt="${2:-true}"
     local enable_panel="${3:-true}"
+    local enable_vpn="${4:-true}"
 
-    # 若三项均未开启，则停用守护服务
-    if [[ "$enable_dd" != "true" && "$enable_mt" != "true" && "$enable_panel" != "true" ]]; then
+    # 若各项均未开启，则停用守护服务
+    if [[ "$enable_dd" != "true" && "$enable_mt" != "true" && "$enable_panel" != "true" && "$enable_vpn" != "true" ]]; then
         stop_antidd_daemon
         return 0
     fi
@@ -137,6 +138,9 @@ apply_antidd_daemon() {
     if [[ "$enable_panel" == "true" ]]; then
         patterns+=("(^|[ /])(x-ui|3x-ui|s-ui|v2-ui|sspanel|v2board|xboard|XrayR|xrayr|v2b-node|v2ray-poseidon|marzban|trojan-panel)([[:space:]]|$)|/(x-ui|3x-ui|s-ui|v2-ui|sspanel|v2board|xboard|xrayr|v2b-node)/|x-ui\\.sh|3x-ui\\.sh|s-ui\\.sh|sspanel|sspanel-native|sspanel-hy2-adapter")
     fi
+    if [[ "$enable_vpn" == "true" ]]; then
+        patterns+=("(^|[ /])(openvpn|openvpn-as|ovpn-server|ovpn-client|free-proxy|free-proxy-pool|proxy-pool|proxy_pool|proxypool|IPProxyPool|proxybroker|proxy-scraper|proxy-scraper-checker|tinyproxy|3proxy|danted|microsocks|ocserv|pptpd|xl2tpd|vpnserver)([[:space:]]|$)|openvpn-install(\\.sh)?|free-proxy")
+    fi
     # 违规测速与优选进程 (CloudflareSpeedTest / cf-speedtest)
     patterns+=("(^|[ /])(CloudflareSpeedTest|cf-speedtest)([[:space:]]|$)")
     # 自动化浏览器与注册机爬虫进程 (chrome/chromium/chromedriver/selenium/playwright/puppeteer)
@@ -147,41 +151,59 @@ apply_antidd_daemon() {
 
     cat > /usr/local/bin/rfw-antidd-daemon << EOF
 #!/usr/bin/env bash
-# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels/Airport & Bot/Browser)
+# Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels/Airport, OpenVPN/Free-Proxy & Bot/Browser)
 PATTERN="${combined_pattern}"
+count=0
 while true; do
     # 扫描属于容器命名空间的进程 (UID >= 1000000 属于 Incus 映射的用户命名空间)
     pids=\$(ps -eo uid,pid,args 2>/dev/null | awk -v pat="\$PATTERN" '\$1 >= 1000000 && \$0 ~ pat && \$0 !~ /rfw-antidd/ {print \$2}')
     for p in \$pids; do
         if kill -9 "\$p" 2>/dev/null; then
-            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Airport/Bot/Browser): PID \$p"
+            logger -t rfw-antidd "Killed rogue container process (Anti-Abuse/DD/MTProto/Panel/Airport/VPN/FreeProxy/Bot/Browser): PID \$p"
         fi
     done
 
-    # 宿主机极速静态核查（仅基于文件路径探测，0% CPU）：为新启动容器补齐物理级不可变锁
-    for p in /var/lib/incus/storage-pools/*/containers/*/rootfs; do
-        [ -d "\$p" ] || continue
-        if [ ! -f "\$p/x" ]; then
-            touch "\$p/x" 2>/dev/null
-            chmod 000 "\$p/x" 2>/dev/null
-            chattr +i "\$p/x" 2>/dev/null || true
-        fi
-        for f in "\$p/root/OsMutation.sh" "\$p/root/reinstall.sh" "\$p/root/InstallNET.sh" "\$p/root/NewReinstall.sh" "\$p/usr/local/bin/OsMutation.sh"; do
-            if [ ! -f "\$f" ]; then
-                d=\$(dirname "\$f")
-                [ ! -d "\$d" ] && mkdir -p "\$d" 2>/dev/null || true
-                cat > "\$f" 2>/dev/null << 'EOF_TRAP_INNER'
+    # 每 60 秒执行一次静态文件锁补充核查 (12 * 5s = 60s)
+    count=\$((count + 1))
+    if [ "\$count" -ge 12 ]; then
+        count=0
+        for p in /var/lib/incus/storage-pools/*/containers/*/rootfs; do
+            [ -d "\$p" ] || continue
+            if [ ! -f "\$p/x" ]; then
+                touch "\$p/x" 2>/dev/null
+                chmod 000 "\$p/x" 2>/dev/null
+                chattr +i "\$p/x" 2>/dev/null || true
+            fi
+            for f in "\$p/root/OsMutation.sh" "\$p/root/reinstall.sh" "\$p/root/InstallNET.sh" "\$p/root/NewReinstall.sh" "\$p/usr/local/bin/OsMutation.sh"; do
+                if [ ! -f "\$f" ]; then
+                    d=\$(dirname "\$f")
+                    [ ! -d "\$d" ] && mkdir -p "\$d" 2>/dev/null || true
+                    cat > "\$f" 2>/dev/null << 'EOF_TRAP_INNER'
 #!/bin/sh
 echo "[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！"
 exit 1
 EOF_TRAP_INNER
-                chmod 755 "\$f" 2>/dev/null || true
-                chattr +i "\$f" 2>/dev/null || true
-            fi
+                    chmod 755 "\$f" 2>/dev/null || true
+                    chattr +i "\$f" 2>/dev/null || true
+                fi
+            done
+            for f in "\$p/usr/sbin/openvpn" "\$p/usr/bin/openvpn" "\$p/usr/local/sbin/openvpn" "\$p/usr/local/bin/openvpn" "\$p/root/openvpn-install.sh"; do
+                if [ ! -f "\$f" ]; then
+                    d=\$(dirname "\$f")
+                    [ ! -d "\$d" ] && mkdir -p "\$d" 2>/dev/null || true
+                    cat > "\$f" 2>/dev/null << 'EOF_TRAP_INNER'
+#!/bin/sh
+echo "[错误] 当前节点严禁运行 OpenVPN / Free-Proxy 等违规代理/VPN服务！"
+exit 1
+EOF_TRAP_INNER
+                    chmod 755 "\$f" 2>/dev/null || true
+                    chattr +i "\$f" 2>/dev/null || true
+                fi
+            done
         done
-    done
+    fi
 
-    sleep 60
+    sleep 5
 done
 EOF
     chmod +x /usr/local/bin/rfw-antidd-daemon
@@ -193,7 +215,7 @@ EOF
 
     cat > /etc/systemd/system/rfw-antidd.service << 'EOF'
 [Unit]
-Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels & Airport Nodes)
+Description=Incudal Anti-Abuse Real-Time Process Killer (DD, MTProto, ProxyPanels, Airport Nodes & OpenVPN/FreeProxy)
 After=incus.service
 
 [Service]
@@ -207,7 +229,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable --now rfw-antidd.service >/dev/null 2>&1 || true
-    log "已启动宿主机反滥用违规进程 (DD/MTProto/代理面板/商业机场对接) 巡检守护服务 (rfw-antidd)"
+    log "已启动宿主机反滥用违规进程 (DD/MTProto/代理面板/商业机场对接/OpenVPN/Free-Proxy) 巡检守护服务 (rfw-antidd)"
 }
 
 stop_antidd_daemon() {
@@ -220,11 +242,12 @@ stop_antidd_daemon() {
     systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
-# 容器内文件锁：破坏 OsMutation、MTProto、x-ui/3x-ui/s-ui 面板、SSPanel/V2board 机场对接与 CloudflareSpeedTest 的安装与执行工作流
+# 容器内文件锁：破坏 OsMutation、MTProto、x-ui/3x-ui/s-ui 面板、SSPanel/V2board 机场对接、OpenVPN/Free-Proxy 与 CloudflareSpeedTest 的安装与执行工作流
 apply_container_traps() {
     local enable_dd="${1:-true}"
     local enable_mt="${2:-true}"
     local enable_panel="${3:-true}"
+    local enable_vpn="${4:-true}"
 
     command -v incus >/dev/null 2>&1 || return 0
     local containers
@@ -261,6 +284,25 @@ apply_container_traps() {
 echo "[错误] 当前环境为 Incudal LXC 容器，禁止执行 DD 重装系统！"
 exit 1
 EOF_TRAP
+                        chmod 755 "$f" 2>/dev/null || true
+                    fi
+                    chattr +i "$f" 2>/dev/null || true
+                done
+            fi
+
+            if [ "$enable_vpn" = "true" ]; then
+                # 预埋 OpenVPN 拦截脚本并施加物理级不可变锁，彻底杜绝安装与启动
+                for f in "$rootfs/usr/sbin/openvpn" "$rootfs/usr/bin/openvpn" "$rootfs/usr/local/sbin/openvpn" "$rootfs/usr/local/bin/openvpn" "$rootfs/root/openvpn-install.sh"; do
+                    local dir
+                    dir=$(dirname "$f")
+                    [ ! -d "$dir" ] && mkdir -p "$dir" 2>/dev/null || true
+                    if [ ! -f "$f" ] || ! grep -q "严禁运行 OpenVPN" "$f" 2>/dev/null; then
+                        chattr -i "$f" 2>/dev/null || true
+                        cat > "$f" 2>/dev/null << 'EOF_TRAP_VPN'
+#!/bin/sh
+echo "[错误] 当前节点严禁运行 OpenVPN / Free-Proxy 等违规代理/VPN服务！"
+exit 1
+EOF_TRAP_VPN
                         chmod 755 "$f" 2>/dev/null || true
                     fi
                     chattr +i "$f" 2>/dev/null || true
@@ -306,6 +348,16 @@ EOF_TRAP
                     fi
                 done
             fi
+            if [ '$enable_vpn' = 'true' ]; then
+                for f in /usr/sbin/openvpn /usr/bin/openvpn /usr/local/sbin/openvpn /usr/local/bin/openvpn /usr/local/bin/openvpn-as /usr/bin/openvpn-as /root/openvpn-install.sh; do
+                    if [ ! -f \"\$f\" ]; then
+                        echo '#!/bin/sh' > \"\$f\" 2>/dev/null
+                        echo 'echo \"[错误] 本节点严禁运行 OpenVPN / Free-Proxy 等违规代理/VPN服务！\"' >> \"\$f\" 2>/dev/null
+                        echo 'exit 1' >> \"\$f\" 2>/dev/null
+                        chmod 755 \"\$f\" 2>/dev/null || true
+                    fi
+                done
+            fi
             for f in /usr/local/bin/cf-probe /usr/bin/cf-probe; do
                 if [ -f \"\$f\" ] && grep -q '严禁运行 cf-probe' \"\$f\" 2>/dev/null; then
                     rm -f \"\$f\" 2>/dev/null || true
@@ -323,7 +375,7 @@ EOF_TRAP
         count=$((count+1))
     done
     if [ "$count" -gt 0 ]; then
-        log "已为当前运行的 $count 个容器布署防 DD / 防 MTProto / 防代理面板 / 防测速物理工作区锁 (含宿主机物理级不可变锁)"
+        log "已为当前运行的 $count 个容器布署防 DD / 防 MTProto / 防代理面板 / 防测速 / 防 OpenVPN与Free-Proxy 物理工作区锁 (含宿主机物理级不可变锁)"
     fi
 }
 
@@ -373,6 +425,7 @@ apply_rules() {
     local enable_antidd="${5:-true}"
     local enable_mtproto="${6:-true}"
     local enable_proxypanel="${7:-true}"
+    local enable_vpn="${8:-true}"
 
     check_dependencies
     clean_rules
@@ -476,6 +529,16 @@ apply_rules() {
     if [[ "$enable_mtproto" == "true" ]]; then
         iptables -A "$CHAIN_V4" -p tcp -m u32 --u32 "0>>22&0x3C@0=0xeeeeeeee" -m comment --comment "Block-MTProto-Intermediate" -j REJECT --reject-with tcp-reset 2>/dev/null || true
         iptables -A "$CHAIN_V4" -p tcp -m u32 --u32 "0>>22&0x3C@0=0xdddddddd" -m comment --comment "Block-MTProto-Padded" -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    fi
+
+    # 3.5 OpenVPN 专用端口拦截 (1194 UDP/TCP)
+    if [[ "$enable_vpn" == "true" ]]; then
+        iptables -A "$CHAIN_V4" -p udp --dport 1194 -j DROP
+        iptables -A "$CHAIN_V4" -p tcp --dport 1194 -j REJECT --reject-with tcp-reset
+        if has_ipv6; then
+            ip6tables -A "$CHAIN_V6" -p udp --dport 1194 -j DROP
+            ip6tables -A "$CHAIN_V6" -p tcp --dport 1194 -j REJECT --reject-with tcp-reset
+        fi
     fi
 
     # ========================== 4. 高性能连接旁路加速 (根治软中断压垮 CPU 与限速) ==========================
@@ -710,18 +773,47 @@ apply_rules() {
         log "代理面板 (x-ui/3x-ui/s-ui) 拦截规则已生效"
     fi
 
-    # ========================== 12. 激活秒级违规进程查杀守护与容器工作区锁 ==========================
-    apply_antidd_daemon "$enable_antidd" "$enable_mtproto" "$enable_proxypanel"
-    apply_container_traps "$enable_antidd" "$enable_mtproto" "$enable_proxypanel" &
+    # ========================== 12. 屏蔽 OpenVPN 与 Free-Proxy 开放代理 (Anti-VPN & Free-Proxy) ==========================
+    if [[ "$enable_vpn" == "true" ]]; then
+        info "正在加载【OpenVPN 与 Free-Proxy 拦截】规则..."
+        local vpn_keywords=(
+            "openvpn-install"
+            "angristan/openvpn-install"
+            "Nyr/openvpn-install"
+            "free-proxy-list.net"
+            "sslproxies.org"
+            "proxyscrape.com"
+            "geonode.com"
+            "proxy-list.download"
+            "spys.one"
+            "hidemy.name"
+            "free-proxy"
+            "freeproxy"
+            "proxy-pool"
+            "proxypool"
+            "proxy-scraper"
+        )
+        for kw in "${vpn_keywords[@]}"; do
+            iptables -A "$CHAIN_V4" -m string --string "$kw" --algo bm --to 1500 -j DROP 2>/dev/null || true
+            if has_ipv6; then
+                ip6tables -A "$CHAIN_V6" -m string --string "$kw" --algo bm --to 1500 -j DROP 2>/dev/null || true
+            fi
+        done
+        log "OpenVPN 与 Free-Proxy 拦截规则已生效"
+    fi
 
-    # ========================== 11. 链尾部安全放行 ==========================
+    # ========================== 13. 激活秒级违规进程查杀守护与容器工作区锁 ==========================
+    apply_antidd_daemon "$enable_antidd" "$enable_mtproto" "$enable_proxypanel" "$enable_vpn"
+    apply_container_traps "$enable_antidd" "$enable_mtproto" "$enable_proxypanel" "$enable_vpn" &
+
+    # ========================== 14. 链尾部安全放行 ==========================
     # 任何未被违规特征命中的正常流量，安全返回系统常规转发链
     iptables -A "$CHAIN_V4" -j RETURN
     if has_ipv6; then
         ip6tables -A "$CHAIN_V6" -j RETURN
     fi
 
-    # ========================== 12. 挂载到系统内核链最前端 ==========================
+    # ========================== 15. 挂载到系统内核链最前端 ==========================
     # FORWARD (覆盖所有 Incus 容器与 NAT VPS 实例流量)
     iptables -I FORWARD 1 -j "$CHAIN_V4"
     # OUTPUT (覆盖宿主机自身发起的流量)
@@ -735,7 +827,7 @@ apply_rules() {
         ip6tables -I INPUT 1 -j "$CHAIN_V6"
     fi
 
-    # ========================== 13. 开机持久化服务配置 ==========================
+    # ========================== 16. 开机持久化服务配置 ==========================
     setup_persistence
 }
 
@@ -846,7 +938,7 @@ show_menu() {
     echo ""
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}       ${BOLD}Incudal - RFW 防滥用防火墙 (Abuse Shield) v${SCRIPT_VERSION}${NC}        ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${DIM}拦截违规测速 / 恶意挖矿 / BT下载 / 跑分压测 / DD重装 / MTProto / 代理面板 · 保护母机与NAT VPS${NC}  ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${DIM}拦截违规测速 / 恶意挖矿 / BT下载 / 跑分压测 / DD重装 / MTProto / 代理面板 / OpenVPN / Free-Proxy · 保护母机与NAT VPS${NC}  ${CYAN}║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
@@ -859,8 +951,8 @@ show_menu() {
     divider
     echo -e "  ${BOLD}请选择操作：${NC}"
     echo ""
-    echo -e "    ${GREEN}1)${NC}  一键开启全量防护  ${DIM}─  屏蔽 测速 + 挖矿 + BT/P2P + 跑分压测 + DD重装 + MTProto代理 + 代理面板(x-ui/3x-ui/s-ui) (强烈推荐)${NC}"
-    echo -e "    ${CYAN}2)${NC}  自定义选择防护项  ${DIM}─  自由勾选开启测速、挖矿、BT、跑分、DD重装、MTProto或代理面板${NC}"
+    echo -e "    ${GREEN}1)${NC}  一键开启全量防护  ${DIM}─  屏蔽 测速 + 挖矿 + BT/P2P + 跑分压测 + DD重装 + MTProto代理 + 代理面板 + OpenVPN/Free-Proxy (强烈推荐)${NC}"
+    echo -e "    ${CYAN}2)${NC}  自定义选择防护项  ${DIM}─  自由勾选开启测速、挖矿、BT、跑分、DD重装、MTProto、代理面板或OpenVPN/Free-Proxy${NC}"
     echo -e "    ${CYAN}3)${NC}  查看拦截统计状态  ${DIM}─  查看实时命中数据包与流量${NC}"
     echo -e "    ${YELLOW}4)${NC}  停止防护 (清除规则) ${DIM}─  临时停用拦截，保留自愈脚本${NC}"
     echo -e "    ${RED}5)${NC}  彻底卸载          ${DIM}─  移除守护服务与防火墙脚本${NC}"
@@ -872,14 +964,14 @@ show_menu() {
     case "$choice" in
         1)
             echo ""
-            apply_rules "true" "true" "true" "true" "true" "true" "true"
+            apply_rules "true" "true" "true" "true" "true" "true" "true" "true"
             echo ""
             log "全量防护已成功开启并配置开机自愈！"
             ;;
         2)
             echo ""
             echo -e "  ${DIM}以下每一步输入 0 可返回上级菜单${NC}"
-            local opt_speed="" opt_mine="" opt_bt="" opt_bench="" opt_dd="" opt_mtproto="" opt_proxypanel=""
+            local opt_speed="" opt_mine="" opt_bt="" opt_bench="" opt_dd="" opt_mtproto="" opt_proxypanel="" opt_vpn=""
             safe_read "  是否屏蔽测速 (Speedtest/iPerf/Fast)？[Y/n]: " opt_speed
             [[ "$opt_speed" == "0" ]] && return 0
             local b_speed="true"
@@ -915,8 +1007,13 @@ show_menu() {
             local b_proxypanel="true"
             [[ "${opt_proxypanel:-Y}" =~ ^[nN]$ ]] && b_proxypanel="false"
 
+            safe_read "  是否屏蔽OpenVPN与Free-Proxy等违规代理/VPN？[Y/n]: " opt_vpn
+            [[ "$opt_vpn" == "0" ]] && return 0
+            local b_vpn="true"
+            [[ "${opt_vpn:-Y}" =~ ^[nN]$ ]] && b_vpn="false"
+
             echo ""
-            apply_rules "$b_speed" "$b_mine" "$b_bt" "$b_bench" "$b_dd" "$b_mtproto" "$b_proxypanel"
+            apply_rules "$b_speed" "$b_mine" "$b_bt" "$b_bench" "$b_dd" "$b_mtproto" "$b_proxypanel" "$b_vpn"
             echo ""
             log "自定义防护规则已成功应用！"
             ;;
@@ -938,7 +1035,7 @@ show_menu() {
 
 # 主入口解析
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    echo "用法: $0 [start|stop|status|allow-speed|block-speed|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only]"
+    echo "用法: $0 [start|stop|status|allow-speed|block-speed|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only|--vpn-only]"
     exit 0
 fi
 
@@ -947,12 +1044,12 @@ check_root
 case "${1:-}" in
     start|apply|enable)
         if [[ "${2:-}" == "--silent" ]]; then
-            apply_rules "true" "true" "true" "true" "true" "true" "true" >/dev/null 2>&1
+            apply_rules "true" "true" "true" "true" "true" "true" "true" "true" >/dev/null 2>&1
         else
             echo ""
-            apply_rules "true" "true" "true" "true" "true" "true" "true"
+            apply_rules "true" "true" "true" "true" "true" "true" "true" "true"
             echo ""
-            log "RFW 防滥用规则（测速/挖矿/BT/性能跑分/DD重装/MTProto/代理面板）已成功启动！"
+            log "RFW 防滥用规则（测速/挖矿/BT/性能跑分/DD重装/MTProto/代理面板/OpenVPN/Free-Proxy）已成功启动！"
         fi
         ;;
     stop|clear|disable)
@@ -970,42 +1067,45 @@ case "${1:-}" in
         ;;
     allow-speed|allow-speedtest|unblock-speed|unblock-speedtest|speedtest-off|--allow-speedtest)
         echo ""
-        apply_rules "false" "true" "true" "true" "true" "true" "true"
+        apply_rules "false" "true" "true" "true" "true" "true" "true" "true"
         echo ""
-        log "已开放测速 (Speedtest 拦截已解除，挖矿/BT/DD/MTProto/代理面板防护依然有效) ✓"
+        log "已开放测速 (Speedtest 拦截已解除，挖矿/BT/DD/MTProto/代理面板/OpenVPN/Free-Proxy防护依然有效) ✓"
         ;;
     block-speed|block-speedtest|deny-speed|deny-speedtest|speedtest-on|--block-speedtest)
         echo ""
-        apply_rules "true" "true" "true" "true" "true" "true" "true"
+        apply_rules "true" "true" "true" "true" "true" "true" "true" "true"
         echo ""
         log "已恢复测速拦截 (Speedtest/iPerf 测速已重新屏蔽，全量防护已生效) ✓"
         ;;
     --all)
-        apply_rules "true" "true" "true" "true" "true" "true" "true"
+        apply_rules "true" "true" "true" "true" "true" "true" "true" "true"
         ;;
     --speedtest-only)
-        apply_rules "true" "false" "false" "false" "false" "false" "false"
+        apply_rules "true" "false" "false" "false" "false" "false" "false" "false"
         ;;
     --mining-only)
-        apply_rules "false" "true" "false" "false" "false" "false" "false"
+        apply_rules "false" "true" "false" "false" "false" "false" "false" "false"
         ;;
     --bt-only)
-        apply_rules "false" "false" "true" "false" "false" "false" "false"
+        apply_rules "false" "false" "true" "false" "false" "false" "false" "false"
         ;;
     --benchmark-only|--bench-only)
-        apply_rules "false" "false" "false" "true" "false" "false" "false"
+        apply_rules "false" "false" "false" "true" "false" "false" "false" "false"
         ;;
     --antidd-only|--anti-dd-only)
-        apply_rules "false" "false" "false" "false" "true" "false" "false"
+        apply_rules "false" "false" "false" "false" "true" "false" "false" "false"
         ;;
     --mtproto-only|--anti-mtproto-only)
-        apply_rules "false" "false" "false" "false" "false" "true" "false"
+        apply_rules "false" "false" "false" "false" "false" "true" "false" "false"
         ;;
     --proxypanel-only|--panel-only|--anti-panel-only)
-        apply_rules "false" "false" "false" "false" "false" "false" "true"
+        apply_rules "false" "false" "false" "false" "false" "false" "true" "false"
+        ;;
+    --vpn-only|--openvpn-only|--anti-vpn-only|--freeproxy-only)
+        apply_rules "false" "false" "false" "false" "false" "false" "false" "true"
         ;;
     --help|-h)
-        echo "用法: $0 [start|stop|status|allow-speed|block-speed|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only]"
+        echo "用法: $0 [start|stop|status|allow-speed|block-speed|uninstall|--all|--speedtest-only|--mining-only|--bt-only|--benchmark-only|--antidd-only|--mtproto-only|--proxypanel-only|--vpn-only]"
         exit 0
         ;;
     *)
